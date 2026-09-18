@@ -167,6 +167,23 @@
                         formaction="{{ url_for('pages.retrack_one', page_id=page.id) }}">Re-track</button>
                 <button class="btn sm {{ 'warn' if not page.is_hidden else 'ghost' }}" type="submit" form="bulk"
                         formaction="{{ url_for('pages.hide_page', page_id=page.id) }}">{{ 'Un-hide' if page.is_hidden else 'Hide' }}</button>
+                {% set imp = page.delete_impact or {} %}
+                <button class="btn sm danger" type="button"
+                        data-delete-page="{{ page.id }}"
+                        data-page-name="{{ page.display_name }}"
+                        data-delete-url="{{ url_for('pages.delete_page', page_id=page.id) }}"
+                        data-impact-ads="{{ imp.ads or 0 }}"
+                        data-impact-versions="{{ imp.ad_versions or 0 }}"
+                        data-impact-products-orphaned="{{ imp.products_orphaned or 0 }}"
+                        data-impact-products-shared="{{ imp.products_shared or 0 }}"
+                        data-impact-history="{{ imp.scan_history or 0 }}"
+                        data-impact-metrics="{{ imp.daily_metrics or 0 }}"
+                        data-impact-snapshots="{{ imp.snapshots or 0 }}"
+                        data-impact-kw-discovered="{{ imp.kw_discovered or 0 }}"
+                        data-impact-kw-results="{{ imp.kw_results or 0 }}"
+                        data-impact-targets="{{ imp.pending_targets or 0 }}"
+                        data-impact-groups="{{ imp.group_memberships or 0 }}"
+                        {% if page.delete_blocked %}disabled title="Cannot delete while a scan is running"{% endif %}>Delete</button>
                 {% if page.library_url %}
                   <a class="btn sm ghost" href="{{ page.library_url }}" target="_blank" rel="noopener" title="Open on Meta">Meta ↗</a>
                 {% endif %}
@@ -186,4 +203,90 @@
 </form>
 
 {{ drawer_mount() }}
+
+{#- Permanent page delete: the button above fills this modal from its
+    data-impact-* attributes; the form is a plain POST, same as every other
+    action on this screen. -#}
+<div class="modal-overlay" id="delete-modal">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title">
+    <div class="modal-head">
+      <h3 id="delete-modal-title">Delete page?</h3>
+      <button class="btn sm ghost" type="button" id="delete-modal-x" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="muted" id="delete-modal-sub"></p>
+      <dl class="impact-list" id="delete-impact-list"></dl>
+      <p class="kept-note" id="delete-kept-note"></p>
+      <label class="confirm-check">
+        <input type="checkbox" id="delete-confirm-check">
+        <span id="delete-confirm-label"></span>
+      </label>
+    </div>
+    <div class="modal-foot">
+      <form method="post" id="delete-form" action="" style="display:contents">
+        <input type="hidden" name="next" value="{{ request.full_path }}">
+        <button class="btn ghost" type="button" id="delete-cancel">Cancel</button>
+        <button class="btn danger" type="submit" id="delete-submit" disabled>Delete page</button>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  var overlay = document.getElementById('delete-modal');
+  if (!overlay) return;
+  var form = document.getElementById('delete-form');
+  var check = document.getElementById('delete-confirm-check');
+  var submitBtn = document.getElementById('delete-submit');
+
+  function row(label, sub, count) {
+    return '<div class="impact-row"><dt>' + label +
+      (sub ? '<span class="impact-sub">' + sub + '</span>' : '') +
+      '</dt><dd>' + count + '</dd></div>';
+  }
+
+  function openModal(btn) {
+    var d = btn.dataset;
+    var name = d.pageName || 'this page';
+    document.getElementById('delete-modal-title').textContent = 'Delete "' + name + '"?';
+    document.getElementById('delete-modal-sub').textContent =
+      'This permanently removes the page and everything collected for it. This cannot be undone.';
+    var orphaned = +d.impactProductsOrphaned || 0;
+    var shared = +d.impactProductsShared || 0;
+    document.getElementById('delete-impact-list').innerHTML =
+      row('Ads', (+d.impactVersions || 0) + ' ad versions & media', +d.impactAds || 0) +
+      row('Products', 'only ones used by no other page', orphaned) +
+      row('Scan history entries', '', +d.impactHistory || 0) +
+      row('Daily metric snapshots', '', +d.impactMetrics || 0) +
+      row('Product scan snapshots', '', +d.impactSnapshots || 0) +
+      row('Keyword discovery links', '', (+d.impactKwDiscovered || 0) + (+d.impactKwResults || 0)) +
+      row('Pending queue targets', 'cancelled', +d.impactTargets || 0) +
+      row('Brand group memberships', '', +d.impactGroups || 0);
+    document.getElementById('delete-kept-note').innerHTML =
+      '<b>Kept safe:</b> ' + shared + ' shared product' + (shared === 1 ? '' : 's') +
+      ' (used by other pages — only unlinked), keyword search history, finished job records.';
+    document.getElementById('delete-confirm-label').textContent =
+      'I understand this permanently deletes "' + name + '" and all its data.';
+    form.action = d.deleteUrl;
+    check.checked = false;
+    submitBtn.disabled = true;
+    overlay.classList.add('open');
+    check.focus();
+  }
+
+  function closeModal() { overlay.classList.remove('open'); }
+
+  document.querySelectorAll('[data-delete-page]').forEach(function (btn) {
+    btn.addEventListener('click', function () { openModal(btn); });
+  });
+  check.addEventListener('change', function () { submitBtn.disabled = !check.checked; });
+  document.getElementById('delete-cancel').addEventListener('click', closeModal);
+  document.getElementById('delete-modal-x').addEventListener('click', closeModal);
+  overlay.addEventListener('click', function (e) { if (e.target === overlay) closeModal(); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeModal(); });
+})();
+</script>
 {% endblock %}

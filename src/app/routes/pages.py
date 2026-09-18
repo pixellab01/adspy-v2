@@ -26,7 +26,7 @@ from flask import (
 )
 
 from .. import config as app_config
-from .. import db, queries
+from .. import db, page_service, queries
 from ..meta_links import (
     is_strict_page_id,
     meta_ads_library_url,
@@ -119,6 +119,10 @@ def index():
         include_hidden=include_hidden,
         changed_only=changed_only,
     )
+    impacts = page_service.delete_page_impact_many([r["id"] for r in rows])
+    for r in rows:
+        r["delete_impact"] = impacts.get(r["id"], {})
+        r["delete_blocked"] = r.get("current_scan_status") == "running"
 
     return render_template(
         "pages.html",
@@ -247,6 +251,27 @@ def hide_page(page_id: int):
         )
     flash(
         f"{page['display_name']} {'hidden' if hidden else 'un-hidden'}.",
+        "success",
+    )
+    return redirect(_back_to_list())
+
+
+@bp.post("/pages/<int:page_id>/delete")
+def delete_page(page_id: int):
+    try:
+        summary = page_service.delete_page(page_id)
+    except page_service.PageNotFoundError:
+        flash("That page does not exist.", "error")
+        return redirect(_back_to_list())
+    except page_service.PageError as exc:
+        flash(str(exc), "error")
+        return redirect(_back_to_list())
+    parts = [f"{summary['ads_deleted']} ads", f"{summary['products_deleted']} products"]
+    if summary["targets_cancelled"]:
+        parts.append(f"{summary['targets_cancelled']} pending targets cancelled")
+    flash(
+        f"Deleted {summary['page_name']} — {', '.join(parts)} "
+        "and all related data removed.",
         "success",
     )
     return redirect(_back_to_list())
