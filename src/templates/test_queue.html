@@ -1,0 +1,209 @@
+{#- Test Queue — v1's board, column for column.
+
+    v1 (tabs/test_queue/ui.py:176-200 + its board script) is a five-column
+    kanban with v1's labels — Queued, Testing (live), Running, Winner, Killed —
+    a "Deleted" toggle and an "Add from Winners" link top right, and per-card
+    buttons that walk the stages: Start test / Back / Run / Mark winner / Kill /
+    Re-queue. All of that is here.
+
+    What changed: the board is server-rendered and the moves are form POSTs.
+    v1 shipped the whole board as a JSON blob plus 400 lines of card-building
+    JavaScript; the same screen in Jinja is the reason no markup in v2 is built
+    outside a template.
+
+    Renders twice: as the page, and as the drawer fragment
+    (/ui/test-queue/<id>) that static/app.js drops into #drawer-body. -#}
+{% import "_macros.html" as ui %}
+
+{%- macro cpp(value) -%}{{ '₹' ~ ('{:,.0f}'.format(value)) if value else '—' }}{%- endmacro -%}
+
+{%- macro stamp(value) -%}{{ (value or '') | replace('T', ' ') | replace('+00:00', ' UTC') or '—' }}{%- endmacro -%}
+
+{%- macro card(item, moves) -%}
+<article class="kcard" data-searchable
+         data-search-text="{{ item.product_name }} {{ item.group_name }} {{ item.buyer_name or '' }} {{ item.queue_status }}">
+  <form method="post" action="{{ url_for('test_queue.delete_item', item_id=item.id) }}">
+    <input type="hidden" name="next" value="{{ request.full_path }}">
+    <button class="kcard-del" type="submit" title="Move to Deleted" aria-label="Move to Deleted">&times;</button>
+  </form>
+  <div class="kc-kicker">Entry #{{ item.id }}</div>
+  <div class="kc-prod">
+    <a href="#" data-drawer="{{ url_for('test_queue.queue_detail_fragment', item_id=item.id) }}">{{ item.product_name or 'Untitled product' }}</a>
+  </div>
+  <div class="kc-meta">
+    <div class="kc-row"><span>Source</span><span class="v" title="{{ item.source_page_name }}">{{ item.source_page_name or 'Unknown page' }}</span></div>
+    <div class="kc-row"><span>Target CPP</span><span class="v">{{ cpp(item.target_cpp) }}</span></div>
+    <div class="kc-row"><span>Active ads</span><span class="v">{{ item.active_ads }}</span></div>
+  </div>
+  <div class="kc-mb">
+    <span class="mb-ava" style="background:{{ ui.avatar_color(item.buyer_name or 'Unassigned') }}">{{ ui.initials(item.buyer_name or 'Unassigned') }}</span>
+    <span>{{ item.buyer_name or 'Unassigned' }}</span>
+  </div>
+  <form class="kc-foot" method="post" action="{{ url_for('test_queue.move_item', item_id=item.id) }}">
+    <input type="hidden" name="next" value="{{ request.full_path }}">
+    {% for label, next_status, tone in moves.get(item.queue_status, []) %}
+      <button class="kmove {{ tone if tone in ('win', 'kill') }}" type="submit" name="status" value="{{ next_status }}">{{ label }}</button>
+    {% endfor %}
+  </form>
+</article>
+{%- endmacro -%}
+
+{%- macro deleted_card(item) -%}
+<article class="kcard" data-searchable data-search-text="{{ item.product_name }} {{ item.group_name }}">
+  <div class="kc-kicker">Deleted entry #{{ item.id }}</div>
+  <div class="kc-prod">{{ item.product_name or 'Untitled product' }}</div>
+  <div class="kc-meta">
+    <div class="kc-row"><span>Target CPP</span><span class="v">{{ cpp(item.target_cpp) }}</span></div>
+    <div class="kc-row"><span>Deleted</span><span class="v">{{ stamp(item.deleted_at) }}</span></div>
+  </div>
+  <div class="kc-foot">
+    <form method="post" action="{{ url_for('test_queue.restore_item', item_id=item.id) }}" style="flex:1;display:flex">
+      <input type="hidden" name="next" value="{{ request.full_path }}">
+      <button class="kmove win" type="submit">Restore</button>
+    </form>
+    <form method="post" action="{{ url_for('test_queue.delete_item', item_id=item.id) }}" style="flex:1;display:flex">
+      <input type="hidden" name="next" value="{{ request.full_path }}">
+      <input type="hidden" name="permanent" value="1">
+      <button class="kmove kill" type="submit">Delete forever</button>
+    </form>
+  </div>
+</article>
+{%- endmacro -%}
+
+
+{% if fragment == 'detail' %}
+{#- ------------------------------------------------------------------ drawer -#}
+{{ ui.drawer_head(
+     item.product_name or 'Untitled product',
+     meta=(item.group_name or 'No group'),
+     kicker='Test Queue entry #' ~ item.id,
+     name_for_avatar=item.product_name,
+     stats=[{'value': item.active_ads, 'label': 'Active'},
+            {'value': item.represented_ads, 'label': 'Represented'},
+            {'value': item.logical_advertisers, 'label': 'Advertisers'},
+            {'value': (item.oldest_active_days | string) ~ 'd', 'label': 'Oldest'}]) }}
+
+{% call ui.drawer_block('Operational details') %}
+  <dl class="facts">
+    <dt>Source page</dt><dd>{{ item.source_page_name or '—' }}</dd>
+    <dt>Buyer</dt><dd>{{ item.buyer_name or 'Unassigned' }}</dd>
+    <dt>Target CPP</dt><dd>{{ cpp(item.target_cpp) }}</dd>
+    <dt>Queue status</dt><dd>{{ ui.status_pill(item.queue_status) }}</dd>
+    <dt>Submitted</dt><dd class="mono faint">{{ stamp(item.queued_at or item.created_at) }}</dd>
+    <dt>{{ 'Deleted' if item.deleted_at else 'Brand group' }}</dt>
+    <dd>{{ stamp(item.deleted_at) if item.deleted_at else (item.group_name or '—') }}</dd>
+  </dl>
+{% endcall %}
+
+{% call ui.drawer_block('Winner evidence') %}
+  <dl class="facts">
+    <dt>Active ads</dt><dd>{{ item.active_ads }}</dd>
+    <dt>Represented ads</dt><dd>{{ item.represented_ads }}</dd>
+    <dt>Logical advertisers</dt><dd>{{ item.logical_advertisers }}</dd>
+    <dt>Oldest active ad</dt><dd>{{ ui.days_pill(item.oldest_active_days) }}</dd>
+    <dt>New ads, 30d</dt><dd>{{ item.new_ads_30d }}</dd>
+    <dt>Winner status</dt><dd>{{ ui.chip(item.winner_status or 'unjudged') }}</dd>
+  </dl>
+  <p class="field-hint">Frozen when the product was pushed — this is what you decided on.</p>
+{% endcall %}
+
+{% call ui.drawer_block('Stage clock') %}
+  <dl class="facts">
+    <dt>Queued</dt><dd class="mono faint">{{ stamp(item.queued_at) }}</dd>
+    <dt>Testing</dt><dd class="mono faint">{{ stamp(item.testing_at) }}</dd>
+    <dt>Running</dt><dd class="mono faint">{{ stamp(item.running_at) }}</dd>
+    <dt>Winner</dt><dd class="mono faint">{{ stamp(item.winner_at) }}</dd>
+    <dt>Killed</dt><dd class="mono faint">{{ stamp(item.killed_at) }}</dd>
+  </dl>
+{% endcall %}
+
+{% call ui.drawer_block('Open records') %}
+  <div class="btn-row">
+    {% if item.external_product_url %}
+      {{ ui.btn('External product ↗', href=item.external_product_url, kind='ghost', size='sm',
+                attrs={'target': '_blank', 'rel': 'noopener'}) }}
+    {% endif %}
+    {% if item.source_page_id %}
+      {{ ui.btn('Source page ↘', href='/pages/' ~ item.source_page_id, kind='ghost', size='sm') }}
+    {% endif %}
+    {% if item.source_platform_page_id %}
+      {{ ui.btn('Ad Library ↗', href=meta_ads_library_url(item.source_platform_page_id),
+                kind='ghost', size='sm', attrs={'target': '_blank', 'rel': 'noopener'}) }}
+    {% endif %}
+    {{ ui.btn('Open in Winners ↘', href='/winners?group_id=' ~ item.group_id, kind='ghost', size='sm') }}
+  </div>
+{% endcall %}
+
+{% call ui.drawer_block('Danger zone') %}
+  <div class="btn-row">
+    {% if item.deleted_at %}
+      <form method="post" action="{{ url_for('test_queue.restore_item', item_id=item.id) }}">
+        {{ ui.btn('Restore', kind='good', size='sm') }}
+      </form>
+    {% else %}
+      <form method="post" action="{{ url_for('test_queue.delete_item', item_id=item.id) }}">
+        {{ ui.btn('Soft delete', kind='warn', size='sm') }}
+      </form>
+    {% endif %}
+    <form method="post" action="{{ url_for('test_queue.delete_item', item_id=item.id) }}">
+      <input type="hidden" name="permanent" value="1">
+      {{ ui.btn('Delete permanently', kind='danger', size='sm') }}
+    </form>
+  </div>
+{% endcall %}
+
+{% else %}
+{#- -------------------------------------------------------------------- page -#}
+{% extends "base.html" %}
+
+{% block actions %}
+  {{ ui.btn('Deleted (' ~ deleted_count ~ ')',
+            href=url_for('test_queue.test_queue_page') if deleted else url_for('test_queue.test_queue_page', deleted=1),
+            kind='primary' if deleted else 'ghost', size='sm') }}
+  {{ ui.btn('+ Add from Winners', href='/winners', kind='ghost', size='sm') }}
+{% endblock %}
+
+{% block content %}
+
+{% if deleted %}
+  {{ ui.notice('Deleted entries. Nothing here is gone until you delete it forever.', 'amber') }}
+  <div style="height:14px"></div>
+  <div class="kanban auto">
+    {% for item in items %}{{ deleted_card(item) }}{% endfor %}
+  </div>
+  {% if not items %}
+    {{ ui.empty_state('Nothing deleted', 'Soft-deleted board entries land here and can be restored.') }}
+  {% endif %}
+
+{% else %}
+  <div class="section-toolbar">
+    <span class="result-count">{{ live_count }} on the board</span>
+  </div>
+
+  {#- .table-wrap is app.css's "this scrolls sideways" box. Five 245px columns
+      do not fit a laptop next to the 208px sidebar, and a board that pushes the
+      whole page sideways is worse than one that scrolls inside its own frame. -#}
+  <div class="table-wrap">
+    <div class="kanban">
+      {% for key, label in board %}
+        {% call ui.kcol(key, label, columns.get(key) | length) %}
+          {% for item in columns.get(key, []) %}
+            {{ card(item, moves) }}
+          {% else %}
+            <div class="kcol-empty">Empty</div>
+          {% endfor %}
+        {% endcall %}
+      {% endfor %}
+    </div>
+  </div>
+
+  {% if not items %}
+    <div style="height:16px"></div>
+    {{ ui.empty_state('The board is empty',
+         'Open Winners, judge a ranked product and push it here. Its evidence is frozen at push time.') }}
+  {% endif %}
+{% endif %}
+
+{{ ui.drawer_mount('Test Queue entry') }}
+{% endblock %}
+{% endif %}

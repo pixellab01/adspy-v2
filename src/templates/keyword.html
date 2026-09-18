@@ -1,0 +1,724 @@
+{#- Keyword Research — v1's tabs/keyword_research/ui.py, plus the two-stage flow.
+
+    Same four sections in v1's order (Research / List / Favorites / Search
+    Details), same table columns in the same order, same buttons in the same
+    places. The difference is that they are server-rendered sections behind
+    `?section=` rather than client-side panels, so every one of them is a real
+    URL you can bookmark and Back out of — and the screen still works with
+    JavaScript off, which v1's did not.
+
+    THE TWO STAGES on this screen:
+      Research   -> stage 1: add a keyword (or 100), optionally "auto-scan"
+                    (bulk mode) and "start now"; the research queue dispatches
+                    discover jobs.
+      Details    -> stage 2: the DISCOVERED PAGES review list with
+                    Accept / Ignore / Scan now per row, Scan selected / Scan all
+                    in bulk, the auto-scan toggle + threshold, and Run history. -#}
+{% import "_macros.html" as ui %}
+{% extends "base.html" %}
+
+{% block heading %}Keyword Research{% endblock %}
+
+{#- ------------------------------------------------------------------ parts -#}
+{% macro filter_chips(item) %}
+  {{ ui.chip(item.country or 'ALL') }}{{ ui.chip(item.ad_status or 'all') }}
+  {{ ui.chip(item.platform or 'all') }}{{ ui.chip(item.media_type or 'all') }}
+{% endmacro %}
+
+{#- The star is a macro-rendered button, so it needs a form around it and the
+    one line of JS at the bottom to submit that form. -#}
+{% macro favorite_form(item, section) %}
+  <form method="post" action="{{ url_for('keyword.favorite', query_id=item.query_id) }}" style="display:inline-flex">
+    <input type="hidden" name="next" value="{{ request.full_path }}">
+    <input type="hidden" name="on" value="{{ '0' if item.is_saved else '1' }}">
+    <input type="hidden" name="section" value="{{ section }}">
+    {{ ui.fav_star(item.is_saved, attrs={'data-submit': '1'}) }}
+  </form>
+{% endmacro %}
+
+{% macro monitor_form(item) %}
+  <form method="post" action="{{ url_for('keyword.monitor', query_id=item.query_id) }}" class="inline-form">
+    <input type="hidden" name="next" value="{{ request.full_path }}">
+    <select name="frequency" class="sm" aria-label="Recurring monitor frequency">
+      {% for value, label in monitor_choices %}
+        <option value="{{ value }}" {{ 'selected' if value == item.monitor_frequency }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <button class="btn sm ghost" type="submit">Set</button>
+  </form>
+{% endmacro %}
+
+{% macro library_table(data, kind) %}
+  <div class="table-wrap">
+    <table class="tbl">
+      {{ ui.thead([('Search',), ('Filters',), ('Runs', 'num'), ('Discovered',),
+                   ('Status',), ('Last used',), ('', 'right')]) }}
+      <tbody>
+        {% for item in data['items'] %}
+          <tr data-searchable data-search-text="{{ item.keyword }} {{ item.country }}">
+            <td>
+              {% set badges %}{{ favorite_form(item, kind) }}{% if item.auto_scan %} {{ ui.tag('auto-scan', 'amber') }}{% endif %}{% endset %}
+              {{ ui.page_cell(item.keyword,
+                              meta='Query ID ' ~ item.query_id ~ ' - depth ' ~ '{:,}'.format(item.default_depth),
+                              href=url_for('keyword.index', section='details', query_id=item.query_id),
+                              badges=badges) }}
+              {% if kind == 'favorites' %}{{ monitor_form(item) }}{% endif %}
+            </td>
+            <td>{{ filter_chips(item) }}</td>
+            <td class="num"><strong>{{ '{:,}'.format(item.run_count or 0) }}</strong></td>
+            <td>
+              <strong>{{ '{:,}'.format(item.discovered_pages or item.cumulative_unique_pages or 0) }} pages</strong>
+              <div class="page-meta">
+                {{ '{:,}'.format(item.discovered_new or 0) }} new to review -
+                {{ '{:,}'.format(item.discovered_scanned or 0) }} scanned -
+                {{ '{:,}'.format(item.cumulative_ads_scanned or 0) }} matching ads
+              </div>
+            </td>
+            <td>{{ ui.status_pill(item.latest_status, item.latest_status|replace('_', ' ')|title) }}</td>
+            <td class="mono faint">{{ item.last_requested_at or item.created_at }}</td>
+            <td class="right">
+              <a class="btn sm ghost" href="{{ url_for('keyword.index', section='details', query_id=item.query_id) }}">Open</a>
+            </td>
+          </tr>
+        {% else %}
+          {{ ui.empty_state('No saved searches.',
+                            'Add one from the Research tab and it appears here.', colspan=7) }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endmacro %}
+
+{% macro library_pager(data, kind) %}
+  {% set start = ((data['page'] - 1) * data['per_page'] + 1) if data['total'] else 0 %}
+  {% set end = [data['total'], data['page'] * data['per_page']]|min %}
+  {% set prev_url = none %}{% set next_url = none %}
+  {% if kind == 'favorites' %}
+    {% if data['page'] > 1 %}{% set prev_url = url_for('keyword.index', section='favorites', fav_page=data['page'] - 1) %}{% endif %}
+    {% if data['page'] < data['pages'] %}{% set next_url = url_for('keyword.index', section='favorites', fav_page=data['page'] + 1) %}{% endif %}
+  {% else %}
+    {% if data['page'] > 1 %}{% set prev_url = url_for('keyword.index', section='list', page=data['page'] - 1) %}{% endif %}
+    {% if data['page'] < data['pages'] %}{% set next_url = url_for('keyword.index', section='list', page=data['page'] + 1) %}{% endif %}
+  {% endif %}
+  {{ ui.pagination(start, end, data['total'], prev_url=prev_url, next_url=next_url,
+                   page=data['page'], pages=data['pages'], unit='searches') }}
+{% endmacro %}
+
+{#- One review-status pill. `status_pill` maps known job words to colours;
+    the review words get their own tag tones so the tabs and the rows agree. -#}
+{% macro review_pill(status) %}
+  {% set tones = {'new': 'amber', 'accepted': 'green', 'ignored': '', 'queued': 'amber',
+                  'scanned': 'green', 'unscannable': 'red'} %}
+  {{ ui.tag(status|replace('_', ' ')|title, tones.get(status, '')) }}
+{% endmacro %}
+
+
+{#- ----------------------------------------------------------------- screen -#}
+{% block content %}
+
+{{ ui.pill_tabs([
+     ('research',  'Research',       url_for('keyword.index', section='research')),
+     ('list',      'List',           url_for('keyword.index', section='list')),
+     ('favorites', 'Favorites',      url_for('keyword.index', section='favorites')),
+     ('details',   'Search Details', url_for('keyword.index', section='details',
+                                             query_id=detail.query.query_id if detail else none))
+   ], section, aria='Keyword Research sections') }}
+
+{% if section == 'research' %}
+
+  {#- v1 flips this tab into "website research" when the term looks like a URL. -#}
+  {% if domain %}
+    {% set domain_label %}{{ ui.tag(domain, 'amber') }}{% endset %}
+    {{ ui.panel_open('Website research',
+                     desc='Search term looks like a website - internal matches plus a fresh Facebook run.',
+                     actions=domain_label) }}
+      <form id="domain-bulk" method="post" action="{{ url_for('keyword.analyze_selected') }}">
+        <input type="hidden" name="next" value="{{ request.full_path }}">
+        <div class="bulk-bar" style="padding:0 18px 0">
+          <button class="btn primary" type="submit" id="retrack-selected" disabled>
+            Scrape selected pages (<span id="selected-count">0</span>)
+          </button>
+          <span class="result-count" style="margin-left:0">Advertiser pages whose ads or products point at this domain.</span>
+        </div>
+        <div class="table-wrap">
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th class="tight"><input type="checkbox" id="select-all" title="select all"></th>
+                <th>Advertiser page</th>
+                <th class="num">Active ads</th>
+                <th class="num">Matching ads</th>
+                <th>Oldest ad</th>
+                <th class="right">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for match in domain_matches %}
+                <tr>
+                  <td class="tight"><input type="checkbox" class="row-check" name="page_id" value="{{ match.page_id }}"></td>
+                  <td>{{ ui.page_cell(match.display_name, meta='ID ' ~ match.platform_page_id,
+                                      href=url_for('pages.detail', page_id=match.page_id)) }}</td>
+                  <td class="num">{{ '{:,}'.format(match.active_ads or 0) }}</td>
+                  <td class="num"><strong>{{ '{:,}'.format(match.matching_ads or 0) }}</strong></td>
+                  <td class="mono faint">{{ match.oldest_ad or '—' }}</td>
+                  <td class="right">
+                    <a class="btn sm ghost" href="{{ url_for('pages.detail', page_id=match.page_id) }}">Page details</a>
+                  </td>
+                </tr>
+              {% else %}
+                {{ ui.empty_inline('Nothing in your data points at this domain yet.', colspan=6) }}
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </form>
+      <div style="padding:14px 18px">
+        {{ ui.queue_hint('Fresh from Facebook: FB text-search hai - exact link-match nahi hota. Queue the domain as a keyword below to run one.') }}
+      </div>
+    {{ ui.panel_close() }}
+  {% endif %}
+
+  {{ ui.panel_open('Add search',
+                   desc='Stage 1 - discover: the extension scrolls the Ad Library keyword search and collects the unique advertiser pages it surfaces. Stage 2 - scan: those pages get a full page scan, by hand from Search Details or automatically with auto-scan.',
+                   pad=true) }}
+    <form method="post" action="{{ url_for('keyword.add_to_queue') }}">
+      <input type="hidden" name="next" value="{{ request.full_path }}">
+
+      <div class="filter-group" role="group" aria-label="Keyword input mode">
+        <button class="filter-btn on" type="button" data-tab="single" aria-pressed="true">Single</button>
+        <button class="filter-btn" type="button" data-tab="bulk" aria-pressed="false">Bulk</button>
+      </div>
+      <div style="height:12px"></div>
+
+      <div data-tab-panel="single">
+        <div class="field">
+          <label for="kw-keyword">Keyword or search link</label>
+          <input class="input-lg" id="kw-keyword" type="text" name="keyword" value="{{ term }}"
+                 placeholder="Astrology app or Meta Ads Library search URL" autocomplete="off">
+        </div>
+      </div>
+      <div data-tab-panel="bulk" hidden>
+        <div class="field">
+          <label for="kw-bulk">Keywords or search links</label>
+          <textarea id="kw-bulk" name="bulk_keywords" placeholder="Paste one keyword or search link per line"></textarea>
+          <span class="field-hint">One item per line - up to 100 items</span>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px">
+        <div class="field">
+          <label for="kw-country">Country</label>
+          <select id="kw-country" name="country">
+            {% for value, label in countries %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label for="kw-status">Ad status</label>
+          <select id="kw-status" name="ad_status">
+            {% for value, label in ad_statuses %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label for="kw-platform">Platform</label>
+          <select id="kw-platform" name="platform">
+            {% for value, label in platforms %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="field">
+          <label for="kw-media">Creative type</label>
+          <select id="kw-media" name="media_type">
+            {% for value, label in media_types %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+          </select>
+          <span class="field-hint">Carousel is detected per ad - the Ad Library has no carousel filter, so that search runs as All.</span>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;align-items:end">
+        <div class="field">
+          <label for="kw-depth">Depth</label>
+          <input id="kw-depth" type="number" name="depth" min="100" max="5000" value="{{ depth_default }}">
+          <span class="field-hint">Stop discovery after this many unique ads</span>
+        </div>
+        <div class="field">
+          <label for="kw-max-pages">Max pages</label>
+          <input id="kw-max-pages" type="number" name="max_pages" min="1" max="1000" value="{{ max_pages_default }}">
+          <span class="field-hint">...or after this many distinct advertiser pages</span>
+        </div>
+        <div class="field">
+          <label for="kw-min-ads">Auto-scan threshold</label>
+          <input id="kw-min-ads" type="number" name="auto_scan_min_ads" min="1" max="1000" value="{{ auto_scan_min_ads_default }}">
+          <span class="field-hint">Pages with at least this many matching ads get scanned</span>
+        </div>
+        <div class="btn-row" style="margin-bottom:14px;flex-wrap:wrap">
+          <label class="check" title="Bulk mode: when discovery finishes, queue a full scan of every page found (above the threshold)">
+            <input type="checkbox" name="auto_scan" value="1"> Auto-scan discovered pages
+          </label>
+          <label class="check" title="Dispatch to the extension immediately instead of waiting in the queue">
+            <input type="checkbox" name="start_now" value="1"> Start now
+          </label>
+          <label class="check"><input type="checkbox" name="favorite" value="1"> Favorite</label>
+          <button class="btn primary" type="submit">Add to queue</button>
+        </div>
+      </div>
+
+      <input type="hidden" name="mode" value="single" data-mode-field>
+    </form>
+  {{ ui.panel_close() }}
+
+  {% set queue_state %}
+    {% if queue %}{{ ui.tag('Processing queue', 'amber') }}{% endif %}
+    {% if queue|rejectattr('job_id')|list %}
+      <form method="post" action="{{ url_for('keyword.research_all') }}" style="display:inline-flex">
+        <input type="hidden" name="next" value="{{ request.full_path }}">
+        <button class="btn sm primary" type="submit"
+                title="Dispatch every waiting search - the extension runs them one after another">Start all waiting</button>
+      </form>
+    {% endif %}
+  {% endset %}
+  {{ ui.panel_open('Research queue',
+                   desc='Discovery runs waiting for, or being worked by, the extension. A finished run moves to its Search Details.',
+                   actions=queue_state) }}
+    <div class="table-wrap">
+      <table class="tbl">
+        {{ ui.thead([('Search',), ('Filters',), ('Mode',), ('Added',), ('Status',), ('Pages found', 'num'), ('Actions', 'right')]) }}
+        <tbody>
+          {% for item in queue %}
+            <tr data-searchable data-search-text="{{ item.keyword }}">
+              <td>{{ ui.page_cell(item.keyword,
+                                  meta='Depth ' ~ '{:,}'.format(item.depth) ~ ' - ' ~ '{:,}'.format(item.max_pages) ~ ' max pages',
+                                  href=url_for('keyword.index', section='details', query_id=item.query_id)) }}</td>
+              <td>{{ filter_chips(item) }}</td>
+              <td>
+                {% if item.auto_scan %}
+                  {{ ui.tag('Discover + auto-scan ' ~ item.min_ads ~ '+', 'amber') }}
+                {% else %}
+                  {{ ui.tag('Discover only') }}
+                {% endif %}
+              </td>
+              <td class="mono faint">{{ item.created_at }}</td>
+              <td>
+                {{ ui.status_pill(item.status, item.status|replace('_', ' ')|title) }}
+                {% if item.job_id %}
+                  <a href="{{ url_for('queue.queue_index') }}" title="Open the job on the Queue screen">{{ ui.tag('job #' ~ item.job_id, 'amber') }}</a>
+                {% endif %}
+              </td>
+              <td class="num">{{ '{:,}'.format(item.unique_pages or 0) if item.job_id else '—' }}</td>
+              <td class="right nowrap">
+                <div class="btn-row" style="justify-content:flex-end">
+                  <form method="post" action="{{ url_for('keyword.research', run_id=item.id) }}">
+                    <input type="hidden" name="next" value="{{ request.full_path }}">
+                    <button class="btn sm primary" type="submit" {{ 'disabled' if item.job_id }}>Research</button>
+                  </form>
+                  <a class="btn sm ghost" href="{{ url_for('keyword.index', section='details', query_id=item.query_id) }}">Details</a>
+                  <form method="post" action="{{ url_for('keyword.remove', run_id=item.id) }}">
+                    <input type="hidden" name="next" value="{{ request.full_path }}">
+                    <button class="btn sm ghost" type="submit">Remove</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+          {% else %}
+            {{ ui.empty_inline('No searches in queue.', colspan=7) }}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {{ ui.panel_close() }}
+
+{% elif section == 'list' %}
+
+  {% set count = ui.tag(library['total'] ~ ' searches') %}
+  {{ ui.panel_open('Search list', actions=count) }}
+    {{ library_table(library, 'list') }}
+    {{ library_pager(library, 'list') }}
+  {{ ui.panel_close() }}
+
+{% elif section == 'favorites' %}
+
+  {% set count = ui.tag(favorites['total'] ~ ' favorites') %}
+  {{ ui.panel_open('Favorite searches', actions=count) }}
+    {{ library_table(favorites, 'favorites') }}
+    {{ library_pager(favorites, 'favorites') }}
+  {{ ui.panel_close() }}
+
+{% elif detail %}
+
+  {% set q = detail.query %}
+  {% set latest = detail.latest_run %}
+  {% set counts = detail.discovered_counts %}
+  {% set automation = detail.automation %}
+  {% set head_actions %}
+    {{ favorite_form(q, 'details') }}
+    <form method="post" action="{{ url_for('keyword.research_query', query_id=q.query_id) }}">
+      <input type="hidden" name="next" value="{{ request.full_path }}">
+      <button class="btn ghost" type="submit" title="Stage 1 again: a fresh discovery run for this search">Run discovery again</button>
+    </form>
+    <a class="btn ghost" href="{{ url_for('keyword.export_discovered_csv', query_id=q.query_id) }}">Export discovered CSV</a>
+    {% if detail.selected_run_id %}
+      <a class="btn ghost" href="{{ url_for('keyword.export_csv', run_id=detail.selected_run_id) }}">Export latest CSV</a>
+    {% endif %}
+  {% endset %}
+
+  {% call ui.result_card(q.keyword,
+        subtitle='Keyword search - Query ID ' ~ q.query_id ~ ' - depth ' ~ '{:,}'.format(q.default_depth)
+                 ~ ' - max ' ~ '{:,}'.format(q.max_pages) ~ ' pages',
+        actions=head_actions) %}
+    <div class="btn-row" style="margin-top:10px">
+      {{ filter_chips(q) }}
+      {% if automation.auto_scan %}{{ ui.tag('Auto-scan on - ' ~ automation.min_ads ~ '+ ads', 'amber') }}{% endif %}
+      {% if detail.open_runs %}{{ ui.tag(detail.open_runs|length ~ ' discovery run(s) in progress', 'amber') }}{% endif %}
+      {% if detail.shared_domain_hint %}
+        {{ ui.tag(detail.shared_domain_hint.pages ~ ' pages share ' ~ detail.shared_domain_hint.domain
+                  ~ ' - Brand Groups me auto-detect suggestion milega', 'amber') }}
+      {% endif %}
+    </div>
+    {{ ui.metric_row([
+         {'value': '{:,}'.format(q.run_count or 0), 'label': 'Runs'},
+         {'value': '{:,}'.format(counts.all or 0), 'label': 'Pages discovered'},
+         {'value': '{:,}'.format(counts.new or 0), 'label': 'New to review'},
+         {'value': '{:,}'.format((counts.queued or 0) + (counts.scanned or 0)), 'label': 'Queued + scanned'},
+         {'value': '{:,}'.format(counts.unscannable or 0), 'label': 'No numeric id'},
+         {'value': '{:,}'.format(detail.cumulative_summary.ads_scanned or 0), 'label': 'Matching ads'},
+         {'value': (latest.status or 'not_run')|replace('_', ' ')|title, 'label': 'Latest run'}
+       ]) }}
+  {% endcall %}
+
+  {#- ----------------------------------------------------- stage 2: automate -#}
+  {{ ui.panel_open('Stage 2 - scan the pages found',
+                   desc='Accept a page to track it, then Scan now / Scan selected / Scan all create a normal page scan (one page, one live job). Auto-scan does the whole thing by itself each time a discovery run completes.',
+                   pad=true) }}
+    <form method="post" action="{{ url_for('keyword.auto_scan', query_id=q.query_id) }}" class="btn-row" style="flex-wrap:wrap;align-items:end">
+      <input type="hidden" name="next" value="{{ request.full_path }}">
+      <input type="hidden" name="on" value="{{ '0' if automation.auto_scan else '1' }}">
+      <div class="field" style="margin:0">
+        <label for="kw-auto-min">Minimum matching ads</label>
+        <input id="kw-auto-min" type="number" name="min_ads" min="1" max="1000" value="{{ automation.min_ads }}" style="width:120px">
+      </div>
+      <label class="check" title="Also make this the default threshold for new searches">
+        <input type="checkbox" name="save_default" value="1"> Save as default
+      </label>
+      <button class="btn {{ 'ghost' if automation.auto_scan else 'primary' }}" type="submit">
+        {{ 'Turn auto-scan off' if automation.auto_scan else 'Turn auto-scan on' }}
+      </button>
+      <span class="result-count" style="margin-left:0">
+        {% if automation.auto_scan %}
+          On. Right now {{ detail.stage2_candidates }} page(s) qualify; the next completed discovery run queues them.
+        {% else %}
+          Off. {{ detail.stage2_candidates }} page(s) would qualify at {{ automation.min_ads }}+ ads.
+        {% endif %}
+      </span>
+    </form>
+  {{ ui.panel_close() }}
+
+  {#- -------------------------------------------------- the review list -#}
+  <div class="section-toolbar">
+    {{ ui.filter_group([
+         ('all',         'All',         url_for('keyword.index', section='details', query_id=q.query_id), counts.all),
+         ('new',         'New',         url_for('keyword.index', section='details', query_id=q.query_id, status='new'), counts.new),
+         ('accepted',    'Accepted',    url_for('keyword.index', section='details', query_id=q.query_id, status='accepted'), counts.accepted),
+         ('ignored',     'Ignored',     url_for('keyword.index', section='details', query_id=q.query_id, status='ignored'), counts.ignored),
+         ('queued',      'Queued',      url_for('keyword.index', section='details', query_id=q.query_id, status='queued'), counts.queued),
+         ('scanned',     'Scanned',     url_for('keyword.index', section='details', query_id=q.query_id, status='scanned'), counts.scanned),
+         ('unscannable', 'Unscannable', url_for('keyword.index', section='details', query_id=q.query_id, status='unscannable'), counts.unscannable)
+       ], detail.review_status, aria='Review status') }}
+    <span class="result-count">{{ detail.discovered|length }} pages shown</span>
+  </div>
+
+  <form id="keyword-bulk" method="post" action="{{ url_for('keyword.scan_selected', query_id=q.query_id) }}">
+    <input type="hidden" name="next" value="{{ request.full_path }}">
+
+    <div class="bulk-bar">
+      <button class="btn primary" type="submit" id="retrack-selected" disabled>
+        Scan selected (<span id="selected-count">0</span>)
+      </button>
+      <button class="btn ghost" type="submit" form="kw-scan-all" {{ 'disabled' if not counts.scannable }}
+              title="Every New or Accepted page with a numeric Meta page id, minus blocked ones">
+        Scan all new + accepted ({{ counts.scannable }})
+      </button>
+      <span class="result-count" style="margin-left:0">
+        Unique advertiser pages this search surfaced, across every run. New runs add pages without removing earlier discoveries.
+        Discovered pages are not tracked until you accept or scan them.
+      </span>
+    </div>
+
+    {{ ui.panel_open('Discovered pages for "' ~ q.keyword ~ '"', scroll=true) }}
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th class="tight"><input type="checkbox" id="select-all" title="select all"></th>
+            <th>Advertiser page</th>
+            <th>Meta Page ID</th>
+            <th class="num" title="Ads matching this keyword (max over runs)">Ads seen</th>
+            <th class="num" title="Discovery runs that surfaced this page">Runs</th>
+            <th class="num" title="Ads stored for this page (active / total)">Ads known</th>
+            <th>Oldest ad</th>
+            <th>Also found for</th>
+            <th>First seen</th>
+            <th>Status</th>
+            <th class="right">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in detail.discovered %}
+            <tr data-searchable data-search-text="{{ row.display_name }} {{ row.platform_page_id }}">
+              <td class="tight">
+                <input type="checkbox" class="row-check" name="page_id" value="{{ row.page_id }}"
+                       {{ 'disabled' if not row.can_scan }}>
+              </td>
+              <td>
+                {% set row_badges %}
+                  {% if row.is_tracked %}{{ ui.micro_badge('tracked', 'green') }}{% endif %}
+                  {% if row.is_blocked %}{{ ui.micro_badge('blocked', 'red') }}{% endif %}
+                {% endset %}
+                {{ ui.page_cell(row.display_name,
+                                meta=(row.last_verified_at and ('verified ' ~ row.last_verified_at)) or 'never page-scanned',
+                                href=url_for('pages.detail', page_id=row.page_id), badges=row_badges) }}
+              </td>
+              <td>
+                {% if row.meta_page_id %}
+                  <code>{{ row.meta_page_id }}</code>
+                {% else %}
+                  <span class="faint" title="{{ row.platform_page_id }}">no numeric id</span>
+                  {% if row.page_url %}<div class="page-meta"><a href="{{ row.page_url }}" target="_blank" rel="noopener">open on Facebook</a></div>{% endif %}
+                {% endif %}
+              </td>
+              <td class="num"><strong>{{ '{:,}'.format(row.ads_seen or 0) }}</strong></td>
+              <td class="num">{{ '{:,}'.format(row.times_seen or 0) }}</td>
+              <td class="num muted">{{ '{:,}'.format(row.active_known or 0) }} / {{ '{:,}'.format(row.ads_known or 0) }}</td>
+              <td class="mono faint">{{ row.oldest_ad or '—' }}</td>
+              <td class="wrap">
+                {% for keyword in row.other_keywords %}{{ ui.chip(keyword) }}{% else %}<span class="faint">—</span>{% endfor %}
+              </td>
+              <td class="mono faint">{{ row.first_seen_at or row.created_at }}</td>
+              <td>
+                {{ review_pill(row.review_status) }}
+                {% if row.scan_job_id %}
+                  <div class="page-meta">job #{{ row.scan_job_id }}{% if row.scan_job_status %} - {{ row.scan_job_status }}{% endif %}</div>
+                {% endif %}
+              </td>
+              <td class="right nowrap">
+                <div class="btn-row" style="justify-content:flex-end">
+                  {% set review_url = url_for('keyword.review_page', query_id=q.query_id, page_id=row.page_id) %}
+                  {% if row.review_status in ('new', 'ignored') %}
+                    <button class="btn sm ghost" type="submit" form="kw-review" formaction="{{ review_url }}"
+                            name="action" value="accept" title="Mark as a real competitor and track it">Accept</button>
+                  {% endif %}
+                  {% if row.can_scan %}
+                    <button class="btn sm primary" type="submit" form="kw-review" formaction="{{ review_url }}"
+                            name="action" value="scan" title="Track it and queue a full page scan">Scan now</button>
+                  {% endif %}
+                  {% if row.review_status in ('new', 'accepted') %}
+                    <button class="btn sm ghost" type="submit" form="kw-review" formaction="{{ review_url }}"
+                            name="action" value="ignore">Ignore</button>
+                  {% elif row.review_status in ('ignored', 'scanned', 'unscannable') %}
+                    <button class="btn sm ghost" type="submit" form="kw-review" formaction="{{ review_url }}"
+                            name="action" value="reset" title="Back to New">Reset</button>
+                  {% endif %}
+                  <a class="btn sm ghost" href="{{ url_for('pages.detail', page_id=row.page_id) }}">Page details</a>
+                  {% if not row.is_blocked %}
+                    <button class="btn sm ghost" type="submit" form="keyword-block"
+                            name="page_id" value="{{ row.page_id }}"
+                            title="Hide this page from results and skip it in future scrapes">Block</button>
+                  {% endif %}
+                </div>
+              </td>
+            </tr>
+          {% else %}
+            {% if detail.review_status != 'all' %}
+              {{ ui.empty_inline('No pages in this state.', colspan=11) }}
+            {% elif detail.open_runs %}
+              {{ ui.empty_state('Discovery is running.',
+                                'Pages land here as the extension posts batches - refresh in a minute.', colspan=11) }}
+            {% else %}
+              {{ ui.empty_state('No pages discovered yet.',
+                                'Press "Run discovery again" and the extension will scroll the search and collect every advertiser page it surfaces.',
+                                colspan=11) }}
+            {% endif %}
+          {% endfor %}
+        </tbody>
+      </table>
+    {{ ui.panel_close() }}
+  </form>
+
+  {#- Per-row review buttons post into this form (via formaction), the Scan-all
+      button into the next one, the Block buttons into the third. They live
+      outside the bulk form because a form cannot be nested inside another. -#}
+  <form id="kw-review" method="post" action="{{ url_for('keyword.index', section='details', query_id=q.query_id) }}" hidden>
+    <input type="hidden" name="next" value="{{ request.full_path }}">
+  </form>
+  <form id="kw-scan-all" method="post" action="{{ url_for('keyword.scan_all', query_id=q.query_id) }}" hidden>
+    <input type="hidden" name="next" value="{{ request.full_path }}">
+  </form>
+  <form id="keyword-block" method="post" action="{{ url_for('keyword.block') }}" hidden>
+    <input type="hidden" name="next" value="{{ request.full_path }}">
+    <input type="hidden" name="query_id" value="{{ q.query_id }}">
+  </form>
+
+  {#- --------------------------------------------------------- run history -#}
+  {{ ui.panel_open('Run history',
+                   desc='Every discovery run of this search, the job behind it, and the scan job it chained into.') }}
+    <div class="table-wrap">
+      <table class="tbl">
+        {{ ui.thead([('Run',), ('Stage 1 - discover',), ('Ads', 'num'), ('Pages', 'num'),
+                     ('Skipped', 'num', 'Ads whose advertiser page could not be resolved (never invented)'),
+                     ('Stop reason',), ('Stage 2 - scan',), ('Finished',)]) }}
+        <tbody>
+          {% for run in detail.history %}
+            <tr>
+              <td>
+                <a href="{{ url_for('keyword.index', section='details', query_id=q.query_id, view='run', run=run.id) }}">Run #{{ run.id }}</a>
+                <div class="page-meta">{{ run.requested_at }}</div>
+              </td>
+              <td>
+                {{ ui.status_pill(run.status, run.status|replace('_', ' ')|title) }}
+                {% if run.job_id %}{{ ui.tag('job #' ~ run.job_id, 'amber') }}{% else %}{{ ui.tag('imported') }}{% endif %}
+              </td>
+              <td class="num">{{ '{:,}'.format(run.ads_scanned or 0) }}</td>
+              <td class="num">{{ '{:,}'.format(run.unique_pages or 0) }}</td>
+              <td class="num muted">{{ '{:,}'.format(run.ads_skipped_no_page or 0) }}</td>
+              <td class="wrap faint">{{ run.stop_reason or '—' }}</td>
+              <td>
+                {% if run.stage2_job_id %}
+                  {{ ui.tag('job #' ~ run.stage2_job_id, 'green') }}
+                  {% if run.stage2_status %}
+                    <div class="page-meta">{{ run.stage2_status }} - {{ run.stage2_done or 0 }}/{{ run.stage2_total or 0 }} pages</div>
+                  {% endif %}
+                {% elif run.stage2_note %}
+                  <span class="faint">{{ run.stage2_note }}</span>
+                {% elif run.status == 'completed' and automation.auto_scan %}
+                  <span class="faint">waiting for the next worker call</span>
+                {% else %}
+                  <span class="faint">—</span>
+                {% endif %}
+              </td>
+              <td class="mono faint">{{ run.finished_at or '—' }}</td>
+            </tr>
+          {% else %}
+            {{ ui.empty_inline('No runs yet.', colspan=8) }}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {{ ui.panel_close() }}
+
+  {#- ------------------------------------------- v1's ranked results table -#}
+  <div class="section-toolbar">
+    {{ ui.filter_group([
+         ('cumulative', 'Cumulative - ' ~ q.run_count ~ (' run' if q.run_count == 1 else ' runs'),
+          url_for('keyword.index', section='details', query_id=q.query_id, view='cumulative')),
+         ('run', 'Run #' ~ (detail.selected_run_id or '-'),
+          url_for('keyword.index', section='details', query_id=q.query_id, view='run',
+                  run=detail.selected_run_id or none))
+       ], detail.view_mode, aria='Result scope') }}
+    <span class="result-count">{{ detail.page_groups|length }} pages ranked</span>
+  </div>
+
+  {{ ui.panel_open('Ranking for "' ~ q.keyword ~ '"',
+                   desc=('Pages ranked by matching ads across all runs.' if detail.view_mode == 'cumulative'
+                         else 'Pages in this run, in the order Meta ranked them.'), scroll=true) }}
+    <table class="tbl">
+      <thead>
+        <tr>
+          <th class="num">#</th>
+          <th>Advertiser page</th>
+          <th>Meta Page ID</th>
+          <th class="num">Matching ads</th>
+          <th class="num">Represented</th>
+          <th class="num">Total active</th>
+          <th>Top product</th>
+          <th class="right">Oldest / action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in detail.page_groups %}
+          <tr data-searchable data-search-text="{{ row.display_name }} {{ row.platform_page_id }}">
+            {#- Cumulative merges rows from several runs, so their per-run rank
+                positions collide; the list's own order is the honest number
+                there. A single run keeps Meta's ranking. -#}
+            <td class="num faint">{{ loop.index if detail.view_mode == 'cumulative'
+                                     else (row.rank_position or loop.index) }}</td>
+            <td>{{ ui.page_cell(row.display_name, meta=row.website_domain,
+                                href=url_for('pages.detail', page_id=row.page_id)) }}</td>
+            <td><code>{{ row.platform_page_id or '-' }}</code></td>
+            <td class="num"><strong>{{ '{:,}'.format(row.ads_matching or 0) }}</strong></td>
+            <td class="num"><strong>{{ '{:,}'.format(row.represented_matching or 0) }}</strong></td>
+            <td class="num muted">{{ '{:,}'.format(row.total_active_page_ads or 0) }}</td>
+            <td class="wrap">{{ row.top_product }}</td>
+            <td class="right nowrap">
+              <div class="btn-row" style="justify-content:flex-end">
+                <span class="mono faint">{{ row.oldest_matching_ad_date or '—' }}</span>
+                <a class="btn sm ghost" href="{{ url_for('pages.detail', page_id=row.page_id) }}">Page details</a>
+                <button class="btn sm ghost" type="submit" form="keyword-block"
+                        name="page_id" value="{{ row.page_id }}"
+                        title="Hide this page from results and skip it in future scrapes">Block</button>
+              </div>
+            </td>
+          </tr>
+        {% else %}
+          {{ ui.empty_inline('Nothing ranked for this scope yet.', colspan=8) }}
+        {% endfor %}
+      </tbody>
+    </table>
+  {{ ui.panel_close() }}
+
+  {% if detail.blocked_page_groups %}
+    {{ ui.panel_open('Blocked pages',
+                     desc=detail.blocked_page_groups|length ~ ' page(s) blocked-hidden from this '
+                          ~ ('search' if detail.view_mode == 'cumulative' else 'run') ~ '.') }}
+      <div class="table-wrap">
+        <table class="tbl">
+          {{ ui.thead([('Blocked page',), ('Meta Page ID',), ('Matching ads', 'num'), ('Action', 'right')]) }}
+          <tbody>
+            {% for row in detail.blocked_page_groups %}
+              <tr>
+                <td>{{ ui.page_cell(row.display_name, meta=row.block_reason or 'No reason recorded') }}</td>
+                <td><code>{{ row.platform_page_id or '-' }}</code></td>
+                <td class="num">{{ '{:,}'.format(row.ads_matching or 0) }}</td>
+                <td class="right">
+                  <form method="post" action="{{ url_for('keyword.unblock', block_id=row.block_id) }}">
+                    <input type="hidden" name="next" value="{{ request.full_path }}">
+                    <input type="hidden" name="query_id" value="{{ q.query_id }}">
+                    <button class="btn sm ghost" type="submit">Unblock</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {{ ui.panel_close() }}
+  {% endif %}
+
+{% else %}
+
+  {{ ui.panel_open('Search Details') }}
+    {{ ui.empty_state('Select a keyword search',
+                      'Open an item from List or Favorites to review its discovered pages and queue their scans.') }}
+  {{ ui.panel_close() }}
+
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+  (function () {
+    // The Single/Bulk toggle is static/app.js's [data-tab] switcher; all this
+    // adds is telling the server which half was showing when it was submitted.
+    document.addEventListener('click', function (event) {
+      var tab = event.target.closest('.filter-btn[data-tab]');
+      if (!tab) return;
+      var field = document.querySelector('[data-mode-field]');
+      if (field) field.value = tab.getAttribute('data-tab');
+    });
+    // Macro-rendered buttons are type="button" by design; the favourite star
+    // sits in a form and submits it.
+    document.addEventListener('click', function (event) {
+      var button = event.target.closest('[data-submit]');
+      if (!button || !button.form) return;
+      event.preventDefault();
+      button.form.submit();
+    });
+  })();
+</script>
+{% endblock %}

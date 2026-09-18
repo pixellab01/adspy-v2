@@ -1,0 +1,180 @@
+{#- The queue screen: jobs, per-target live status, retry, errors.
+
+    This template renders twice over: as a full page, and — when
+    `fragment == 'rows'` — as just the job cards, which static/app.js polls
+    every few seconds from /ui/queue/rows. Same macro both times, so the live
+    view can never drift from the first paint, and no row markup is ever built
+    outside Jinja. -#}
+{% import "_macros.html" as ui %}
+
+{% macro target_table(rows) %}
+  <div class="table-wrap">
+    <table class="tbl">
+      {{ ui.thead([('#', 'num'), ('Page',), ('Status',), ('Outcome',), ('Scrolls', 'num'),
+                   ('Unique ads', 'num'), ('FB est.', 'num'), ('Coverage', 'num'), ('Message',)]) }}
+      <tbody>
+        {% for target in rows %}
+          <tr>
+            <td class="num faint">{{ target.position }}</td>
+            <td>
+              {% if target.page_id %}
+                <a href="/pages/{{ target.page_id }}">{{ target.display_name }}</a>
+              {% else %}{{ target.display_name }}{% endif %}
+            </td>
+            <td>{{ ui.status_pill(target.status) }}</td>
+            <td>{{ target.outcome or '—' }}</td>
+            <td class="num">{{ target.scrolls }}</td>
+            <td class="num">{{ target.unique_ads }}</td>
+            <td class="num muted">{{ target.estimated_results or '—' }}</td>
+            <td class="num muted">{{ (target.coverage_pct ~ '%') if target.coverage_pct is not none else '—' }}</td>
+            <td class="wrap muted">{{ target.message or '' }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endmacro %}
+
+{% macro job_card(job, rows) %}
+  <article class="job {{ 'is-open' if job.is_open }} {{ 'is-bad' if job.status in ('failed', 'cancelled') or job.failed_targets }}"
+           data-job-id="{{ job.id }}" data-searchable
+           data-search-text="{{ job.id }} {{ job.label or job.job_type }} {{ job.status }}">
+    <header class="job-head">
+      <div class="job-title">
+        <a href="/queue/{{ job.id }}">#{{ job.id }}</a>
+        <strong>{{ job.label or job.job_type }}</strong>
+        {{ ui.status_pill(job.status) }}
+        {% if job.cancel_requested_at %}{{ ui.badge('cancelling', 'failed') }}{% endif %}
+        {% if job.retry_count %}{{ ui.tag('retry ' ~ job.retry_count ~ '/' ~ job.max_retries, 'amber') }}{% endif %}
+      </div>
+      <div class="job-actions">
+        {% if job.can_retry %}
+          <form method="post" action="/queue/{{ job.id }}/retry">
+            <input type="hidden" name="next" value="{{ request.full_path }}">
+            <button class="btn sm ghost" type="submit">Retry</button>
+          </form>
+        {% endif %}
+        {% if job.can_cancel %}
+          <form method="post" action="/queue/{{ job.id }}/cancel">
+            <input type="hidden" name="next" value="{{ request.full_path }}">
+            <button class="btn sm warn" type="submit">Cancel</button>
+          </form>
+        {% endif %}
+      </div>
+    </header>
+
+    <div class="job-progress" title="{{ job.done_targets }} of {{ job.targets }} targets done">
+      <div class="job-progress-fill" style="width: {{ job.progress_pct }}%"></div>
+    </div>
+
+    <div class="job-facts">
+      <span>{{ job.done_targets }}/{{ job.targets }} pages</span>
+      {% if job.failed_targets %}<span class="delta-down">{{ job.failed_targets }} failed</span>{% endif %}
+      <span>{{ job.unique_ads }} ads seen</span>
+      <span>{{ job.scrolls }} scrolls</span>
+      <span>{{ job.batches }} batches</span>
+      <span>created {{ job.created_at }}</span>
+      {% if job.finished_at %}<span>finished {{ job.finished_at }}</span>{% endif %}
+      {% if job.lease_expires_at and job.is_open %}<span>lease -&gt; {{ job.lease_expires_at }}</span>{% endif %}
+    </div>
+
+    {% if job.error or job.error_code %}
+      <p class="job-error">
+        <strong>{{ job.error_code or 'error' }}</strong>
+        {{ job.error or '' }}
+        {% if job.retryable %}{{ ui.tag('retryable', 'amber') }}{% endif %}
+      </p>
+    {% endif %}
+
+    {% if rows %}{{ target_table(rows) }}{% endif %}
+  </article>
+{% endmacro %}
+
+{% macro job_rows(jobs, targets) %}
+  {% for job in jobs %}
+    {{ job_card(job, targets.get(job.id)) }}
+  {% else %}
+    <div class="empty">
+      <h2>Queue is empty</h2>
+      <p>Select pages on the Page Analyzer screen and hit "Re-track".</p>
+    </div>
+  {% endfor %}
+{% endmacro %}
+
+{% if fragment == 'rows' %}
+{{ job_rows(jobs, targets) }}
+{% else %}
+{% extends "base.html" %}
+
+{% block heading %}{{ 'Job #' ~ jobs[0].id if single and jobs else 'Queue' }}{% endblock %}
+
+{% block actions %}
+  {% if not single %}
+    <form method="post" action="{{ url_for('queue.toggle_pause') }}">
+      <input type="hidden" name="next" value="{{ request.full_path }}">
+      <input type="hidden" name="paused" value="{{ '0' if paused else '1' }}">
+      <button class="btn {{ 'primary' if paused else 'ghost' }}" type="submit">
+        {{ 'Resume queue' if paused else 'Pause queue' }}
+      </button>
+    </form>
+  {% else %}
+    <a class="btn ghost" href="/queue">All jobs</a>
+  {% endif %}
+{% endblock %}
+
+{% block content %}
+
+{% if paused %}
+  {{ ui.notice('Queue is paused — jobs stay put until you resume.', 'amber') }}
+  <div style="height:14px"></div>
+{% endif %}
+
+{% if not single %}
+  <div class="section-toolbar">
+    {{ ui.pill_tabs([
+         ('',          'All',       url_for('queue.queue_index')),
+         ('open',      'Open',      url_for('queue.queue_index', status='open')),
+         ('failed',    'Failed',    url_for('queue.queue_index', status='failed')),
+         ('completed', 'Completed', url_for('queue.queue_index', status='completed'))
+       ], status or '', aria='Job status') }}
+    <span class="result-count">
+      {{ counts.pending }} pending - {{ counts.running }} running -
+      {{ counts.failed }} failed - {{ counts.completed }} completed
+    </span>
+  </div>
+{% endif %}
+
+<div id="queue-rows"
+     data-poll="{{ url_for('queue.queue_rows_fragment', job=jobs[0].id if single and jobs else none, status=status or none) }}"
+     data-poll-active="{{ '1' if jobs | selectattr('is_open') | list else '0' }}">
+  {{ job_rows(jobs, targets) }}
+</div>
+
+{% if single and batches %}
+  {{ ui.panel_open('Batches', desc='Every accepted upload for this job, newest last.', scroll=true) }}
+    <table class="tbl">
+      {{ ui.thead([('Seq', 'num'), ('Batch id',), ('Target', 'num'), ('Final',), ('Outcome',), ('Status',),
+                   ('Seen', 'num'), ('New', 'num'), ('Updated', 'num'), ('Stopped', 'num'), ('Received',)]) }}
+      <tbody>
+        {% for batch in batches %}
+          <tr>
+            <td class="num">{{ batch.batch_sequence }}</td>
+            <td><code>{{ batch.batch_id }}</code></td>
+            <td class="num faint">{{ batch.target_position if batch.target_position is not none else '—' }}</td>
+            <td>{{ 'yes' if batch.is_final else '' }}</td>
+            <td>{{ batch.outcome or '—' }}</td>
+            <td>{{ ui.status_pill(batch.status, 'accepted' if batch.status == 'accepted' else batch.status) }}</td>
+            <td class="num">{{ batch.ads_seen }}</td>
+            <td class="num delta-up">{{ batch.ads_new }}</td>
+            <td class="num">{{ batch.ads_updated }}</td>
+            <td class="num delta-down">{{ batch.ads_deactivated }}</td>
+            <td class="mono faint">{{ batch.received_at }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {{ ui.panel_close() }}
+{% endif %}
+
+{% endblock %}
+{% endif %}

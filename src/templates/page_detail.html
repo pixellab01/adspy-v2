@@ -1,0 +1,140 @@
+{% from "_drawer.html" import drawer_mount, ad_grid, change_note %}
+{% import "_macros.html" as ui %}
+{% extends "base.html" %}
+
+{#- One page's ads. The band right under the header is the point of this
+    screen: what STARTED and what STOPPED in the last scan (PRD P0.5). Green
+    on the left, red on the right, before any filtering — the owner should not
+    have to hunt for it. -#}
+
+{% block title %}{{ page.display_name }} - Pixellab Ad Spy{% endblock %}
+{% block heading %}{{ page.display_name }}{% endblock %}
+
+{% block content %}
+
+<section class="result-card">
+  <div class="result-head">
+    {{ ui.avatar(page.display_name) }}
+    <div class="main-copy">
+      <h2>{{ page.display_name }}
+        {% if page.is_hidden %}{{ ui.tag('hidden') }}{% endif %}
+        {% if page.is_queued %}{{ ui.badge('queued') }}{% endif %}
+      </h2>
+      <div class="page-meta">ID {{ page.platform_page_id }}
+        {%- if page.days_since_scan is not none %} - scanned {{ page.days_since_scan }}d ago{% endif %}</div>
+    </div>
+    <div class="btn-row">
+      <form method="post" action="{{ url_for('pages.retrack_one', page_id=page.id) }}">
+        <input type="hidden" name="next" value="{{ request.full_path }}">
+        <button class="btn primary" type="submit" {{ 'disabled' if page.is_queued }}>
+          {{ 'Queued' if page.is_queued else 'Re-track' }}
+        </button>
+      </form>
+      {% if page.library_url %}
+        <a class="btn ghost" href="{{ page.library_url }}" target="_blank" rel="noopener">Ad Library ↗</a>
+      {% endif %}
+      <a class="btn ghost" href="{{ url_for('pages.index') }}">All pages</a>
+    </div>
+  </div>
+
+  <div class="metric-row">
+    {{ ui.mini_metric(counts.active, 'Active ads') }}
+    {{ ui.mini_metric(counts.inactive, 'Stopped') }}
+    {{ ui.mini_metric(page.fb_estimated_results if page.fb_estimated_results is not none else '—', 'FB estimate') }}
+    <div class="mini-metric">
+      <div class="v {{ 'delta-up' if (page.delta or 0) > 0 else ('delta-down' if (page.delta or 0) < 0 else 'delta-flat') }}"
+           style="font-size:18px">
+        {% if page.delta is none %}—{% else %}{{ '+' if page.delta > 0 }}{{ page.delta }}{% endif %}
+      </div>
+      <div class="l">Δ since last scan</div>
+    </div>
+    <div class="mini-metric{{ ' stale' if page.staleness == 'warn' }}{{ ' very-stale' if page.staleness not in ('fresh', 'warn') }}">
+      <div class="v">{% if page.days_since_scan is none %}never{% else %}{{ page.days_since_scan }}d{% endif %}</div>
+      <div class="l">Since last scan</div>
+    </div>
+    {% if metrics %}
+      <div class="mini-metric stat-spark">
+        <svg class="spark" viewBox="0 0 120 28" width="120" height="28" preserveAspectRatio="none" role="img"
+             aria-label="active ads, last {{ metrics|length }} days">
+          <polyline points="{{ sparkline }}" fill="none" stroke="currentColor" stroke-width="1.6"
+                    stroke-linejoin="round" stroke-linecap="round"></polyline>
+        </svg>
+        <div class="l">Active ads - {{ metrics|length }}d</div>
+      </div>
+    {% endif %}
+  </div>
+</section>
+
+{% set scan_note %}
+  {% if window.started_at %}
+    scan started <span class="mono">{{ window.started_at }}</span>
+    {% if window.source == 'page' %}{{ ui.tag('approx.') }}{% endif %}
+  {% else %}
+    this page has never completed a scan - hit Re-track
+  {% endif %}
+{% endset %}
+{{ ui.panel_open('Since the last scan', desc=scan_note, pad=true) }}
+  <div class="changes-cols">
+    <div class="changes-col new">
+      <h3><span class="delta-up">+{{ new_ads|length }}</span> new</h3>
+      {{ ad_grid(new_ads, 'Nothing new in the last scan.') }}
+      {{ change_note(page.last_new_ads, new_ads, 'new ads') }}
+    </div>
+    <div class="changes-col stopped">
+      <h3><span class="delta-down">-{{ stopped_ads|length }}</span> stopped</h3>
+      {{ ad_grid(stopped_ads, 'Nothing stopped in the last scan.') }}
+      {{ change_note(page.last_stopped_ads, stopped_ads, 'stopped ads') }}
+    </div>
+  </div>
+{{ ui.panel_close() }}
+
+<div class="section-toolbar">
+  {{ ui.pill_tabs([
+       ('active',   'Active',  url_for('pages.detail', page_id=page.id, status='active',   sort=sort, q=search or none), counts.active),
+       ('inactive', 'Stopped', url_for('pages.detail', page_id=page.id, status='inactive', sort=sort, q=search or none), counts.inactive),
+       ('all',      'All',     url_for('pages.detail', page_id=page.id, status='all',      sort=sort, q=search or none), counts.total)
+     ], status, aria='Ad status') }}
+  <form class="inline-form" style="margin-left:auto" method="get" action="{{ url_for('pages.detail', page_id=page.id) }}">
+    <input type="hidden" name="status" value="{{ status }}">
+    <input type="search" name="q" value="{{ search }}" placeholder="search copy, URL, library id" size="24">
+    <select name="sort" class="sm">
+      {% for key in ad_sorts %}
+        <option value="{{ key }}" {{ 'selected' if sort == key }}>{{ key.replace('_', ' ') }}</option>
+      {% endfor %}
+    </select>
+    <button class="btn" type="submit">Apply</button>
+  </form>
+</div>
+
+{{ ad_grid(ads, 'No ads match this filter.') }}
+
+<div style="height:22px"></div>
+
+{{ ui.panel_open('Scan history', desc='Every job that touched this page.', scroll=true) }}
+  {% if history %}
+    <table class="tbl">
+      {{ ui.thead([('Job',), ('Status',), ('Outcome',), ('Scrolls', 'num'), ('Unique ads', 'num'),
+                   ('FB est.', 'num'), ('Started',), ('Finished',), ('Message',)]) }}
+      <tbody>
+        {% for row in history %}
+          <tr>
+            <td class="mono"><a href="{{ url_for('queue.job_detail', job_id=row.job_id) }}">#{{ row.job_id }}</a></td>
+            <td>{{ ui.status_pill(row.status) }}</td>
+            <td>{{ row.outcome or '—' }}</td>
+            <td class="num">{{ row.scrolls }}</td>
+            <td class="num">{{ row.unique_ads }}</td>
+            <td class="num muted">{{ row.estimated_results or '—' }}</td>
+            <td class="mono faint">{{ row.started_at or '—' }}</td>
+            <td class="mono faint">{{ row.finished_at or '—' }}</td>
+            <td class="wrap muted">{{ row.message or '' }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    {{ ui.empty_two('No scans recorded for this page yet.', 'Hit Re-track and the extension will pick it up.') }}
+  {% endif %}
+{{ ui.panel_close() }}
+
+{{ drawer_mount() }}
+{% endblock %}

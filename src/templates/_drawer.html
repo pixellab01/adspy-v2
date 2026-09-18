@@ -1,0 +1,263 @@
+{# ---------------------------------------------------------------------------
+   THE shared ads drawer. One file, used by every screen.
+
+   In v1 this markup was copy-pasted into four different Python f-string UI
+   generators and drifted apart in all four. Here it is a set of Jinja macros
+   plus three fragment modes, and the server renders the fragment that
+   static/app.js drops into the drawer — so no screen ever builds ad markup of
+   its own, and no HTML is built outside a template.
+
+   Styling lives in static/app.css §21 (.ad-card, .ad-grid, .ad-media). This
+   file used to carry its own <style> block; it does not any more, because the
+   design system is one stylesheet now.
+
+   Fragment modes (rendered by app/routes/pages.py):
+     drawer_mode = 'ad'       one ad: media, copy, version history, products
+     drawer_mode = 'changes'  a page's new + stopped ads since the last scan
+     drawer_mode = 'missing'  it is gone
+
+   Macros for the screens:
+     drawer_mount()           the empty drawer (once per page)
+     ad_card(ad)              one ad tile
+     ad_grid(ads, empty_text) a grid of tiles
+--------------------------------------------------------------------------- #}
+{%- import "_macros.html" as ui -%}
+{%- import "_transcripts.html" as tr -%}
+
+{%- macro media_preview(ad, tall=false) -%}
+  {%- if ad.preview_url -%}
+    {%- if ad.is_video -%}
+      <video class="ad-media {{ 'is-tall' if tall else '' }}" src="{{ ad.preview_url }}"
+             controls preload="none" playsinline></video>
+    {%- else -%}
+      <img class="ad-media {{ 'is-tall' if tall else '' }}" src="{{ ad.preview_url }}"
+           alt="" loading="lazy" referrerpolicy="no-referrer">
+    {%- endif -%}
+    {%- if ad.media_count > 1 %}<span class="media-count">{{ ad.media_count }} files</span>{% endif -%}
+  {%- else -%}
+    <div class="ad-media ad-media-empty {{ 'is-tall' if tall else '' }}">no media</div>
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro ad_meta(ad) -%}
+  <div class="ad-meta">
+    {{ ui.badge(ad.status) }}
+    {%- if ad.start_date %}
+      <span>{{ ad.start_date }}</span>
+      {%- if ad.days_running is not none %}
+        <span class="days-running" title="days running">{{ ad.days_running }}d</span>
+      {%- endif %}
+    {%- else %}
+      <span class="faint">no start date</span>
+    {%- endif %}
+    {%- if ad.represented_ad_count and ad.represented_ad_count > 1 %}
+      {{ ui.tag('x' ~ ad.represented_ad_count, 'blue') }}
+    {%- endif %}
+    {%- if ad.version_count and ad.version_count > 1 %}
+      {{ ui.tag('v' ~ ad.version_count) }}
+    {%- endif %}
+    {#- Script identity, when the caller knows it. This is what turns a wall of
+        thumbnails into the answer to "how many of these are actually the same
+        video": two cards carrying S-7 are one script, however different their
+        headlines look. Screens that do not compute it pass a dict without the
+        key, which is Undefined and therefore falsy — nothing else changes. -#}
+    {%- if ad.script_label %}
+      {{ ui.micro_badge(ad.script_label, 'amber') }}
+    {%- endif %}
+    {%- if ad.language_name and ad.language_name != 'Unknown' %}
+      {{ ui.tag(ad.language_name) }}
+    {%- endif %}
+  </div>
+{%- endmacro -%}
+
+{%- macro ad_card(ad) -%}
+  <article class="ad-card" data-ad-id="{{ ad.id }}" data-searchable
+           data-search-text="{{ (ad.headline or '') ~ ' ' ~ (ad.snippet or '') ~ ' ' ~ ad.library_id }}">
+    <button type="button" class="ad-card-open" data-drawer="/ui/drawer/ad/{{ ad.id }}"
+            title="Open details">
+      {{ media_preview(ad) }}
+    </button>
+    <div class="ad-card-body">
+      {{ ad_meta(ad) }}
+      {% if ad.headline %}<p class="ad-headline">{{ ad.headline }}</p>{% endif %}
+      {% if ad.hook %}<p class="ad-text">{{ ad.hook }}</p>{% endif %}
+      {% if ad.snippet %}<p class="ad-text">{{ ad.snippet }}</p>{% endif %}
+      <div class="ad-card-foot">
+        <button type="button" class="linklike" data-drawer="/ui/drawer/ad/{{ ad.id }}">details</button>
+        {% if ad.library_url %}
+          <a href="{{ ad.library_url }}" target="_blank" rel="noopener">Ad Library ↗</a>
+        {% endif %}
+        {% if ad.destination_url %}
+          <a href="{{ ad.destination_url }}" target="_blank" rel="noopener noreferrer">landing ↗</a>
+        {% endif %}
+      </div>
+    </div>
+  </article>
+{%- endmacro -%}
+
+{%- macro ad_grid(ads, empty_text='No ads here.') -%}
+  {% if ads %}
+    <div class="ad-grid">{% for ad in ads %}{{ ad_card(ad) }}{% endfor %}</div>
+  {% else %}
+    <p class="empty-line">{{ empty_text }}</p>
+  {% endif %}
+{%- endmacro -%}
+
+{#- Reconciliation counts new/stopped ads on the page row; this grid lists the
+    ad rows that fall inside the scan window. They disagree for v1-imported
+    pages and for ads first captured before the window, so say so out loud
+    rather than showing a silent "nothing here". -#}
+{%- macro change_note(counter, shown, kind) -%}
+  {% if counter and not shown %}
+    <p class="empty-line">
+      The last scan counted {{ counter }} {{ kind }}, but no ad rows fall inside that
+      scan window — usually data that came from v1 rather than from a v2 scan.
+    </p>
+  {% endif %}
+{%- endmacro -%}
+
+{#- Kept as a thin alias so screens can keep importing it from here. -#}
+{%- macro drawer_mount() -%}{{ ui.drawer_mount('Ad details') }}{%- endmacro -%}
+
+{# --------------------------------------------------------------- fragments #}
+{% if drawer_mode == 'ad' %}
+  <header class="drawer-head">
+    <div class="drawer-kicker">Ad details</div>
+    <div class="drawer-pagehead">
+      {%- if ad.page %}{{ ui.avatar(ad.page.display_name) }}{% endif %}
+      <div>
+        <div class="nm">{{ ad.headline or ad.page.display_name or 'Ad' }}</div>
+        <div class="mt mono">{{ ad.library_id }}
+          {% if ad.page %}- <a href="/pages/{{ ad.page.id }}">{{ ad.page.display_name }}</a>{% endif %}
+        </div>
+      </div>
+    </div>
+    {{ ad_meta(ad) }}
+  </header>
+
+  {{ media_preview(ad, tall=true) }}
+  {% if ad.media_count > 1 %}
+    <div class="drawer-media-list">
+      {% for url in ad.media_list[1:] %}
+        <a class="mono" href="{{ url }}" target="_blank" rel="noopener noreferrer">file {{ loop.index + 1 }} ↗</a>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {% if ad.ad_text %}<section class="drawer-block"><h3>Ad copy</h3><p class="ad-body">{{ ad.ad_text }}</p></section>{% endif %}
+  {% if ad.description %}<section class="drawer-block"><h3>Description</h3><p class="ad-body">{{ ad.description }}</p></section>{% endif %}
+
+  {#- What the video SAYS and in which language. Read through the
+      `ad_transcript_for` global that app/routes/products.py registers, so the
+      ad-drawer route stays ignorant of transcription; when that blueprint is
+      not loaded the section is simply absent. Reads only. -#}
+  {% if ad_transcript_for is defined %}
+    {% set intel = ad_transcript_for(ad.id) %}
+    {% if intel %}{{ tr.ad_transcript_section(intel, ad) }}{% endif %}
+  {% endif %}
+
+  <section class="drawer-block">
+    <h3>Facts</h3>
+    <dl class="facts">
+      <dt>CTA</dt><dd>{{ ad.cta or '—' }}</dd>
+      <dt>Landing</dt>
+      <dd>
+        {% if ad.destination_url %}
+          <a class="linklike" href="{{ ad.destination_url }}" target="_blank" rel="noopener noreferrer">{{ ad.destination_url }}</a>
+        {% else %}—{% endif %}
+      </dd>
+      <dt>Media type</dt><dd>{{ ad.media_type or 'unknown' }}</dd>
+      <dt>First seen</dt><dd class="mono">{{ ad.first_captured_at or '—' }}</dd>
+      <dt>Last seen</dt><dd class="mono">{{ ad.last_captured_at or '—' }}</dd>
+      {% if ad.end_date %}<dt>Stopped</dt><dd class="mono">{{ ad.end_date }}</dd>{% endif %}
+    </dl>
+  </section>
+
+  {% if products %}
+    <section class="drawer-block">
+      <h3>Products</h3>
+      <ul class="plain">
+        {% for product in products %}
+          <li>{{ product.display_name or product.normalized_name }}
+            {% if product.shortlist_state %}{{ ui.badge(product.shortlist_state) }}{% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    </section>
+  {% endif %}
+
+  <section class="drawer-block">
+    <h3>Versions <span class="faint">({{ versions|length }})</span></h3>
+    {% if versions %}
+      <ol class="versions">
+        {% for version in versions %}
+          <li>
+            <div class="version-head">
+              <strong>v{{ version.version_number }}</strong>
+              <span class="mono faint">{{ version.captured_at }}</span>
+            </div>
+            {% if version.change_summary %}<p class="muted">{{ version.change_summary }}</p>{% endif %}
+            {% if version.headline %}<p class="ad-headline">{{ version.headline }}</p>{% endif %}
+            {% if version.ad_text %}<p class="ad-body">{{ version.ad_text }}</p>{% endif %}
+          </li>
+        {% endfor %}
+      </ol>
+    {% else %}
+      <p class="muted">Only one creative version so far.</p>
+    {% endif %}
+  </section>
+
+  <div class="drawer-actions" style="margin-top:24px">
+    {% if ad.library_url %}
+      <a class="btn primary" href="{{ ad.library_url }}" target="_blank" rel="noopener">Open in Ad Library ↗</a>
+    {% endif %}
+    {% if ad.page %}<a class="btn ghost" href="/pages/{{ ad.page.id }}">Page</a>{% endif %}
+  </div>
+
+{% elif drawer_mode == 'changes' %}
+  <header class="drawer-head">
+    <div class="drawer-kicker">Since the last scan</div>
+    <div class="drawer-pagehead">
+      {{ ui.avatar(page.display_name) }}
+      <div>
+        <div class="nm">{{ page.display_name }}</div>
+        <div class="mt">
+          {% if window.started_at %}
+            scan started <span class="mono">{{ window.started_at }}</span>
+            {% if window.source == 'page' %}{{ ui.tag('approx.') }}{% endif %}
+          {% else %}
+            this page has never completed a scan
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    <div class="drawer-statgrid">
+      <div class="dstat"><div class="v delta-up">+{{ page.last_new_ads or 0 }}</div><div class="l">New</div></div>
+      <div class="dstat"><div class="v delta-down">-{{ page.last_stopped_ads or 0 }}</div><div class="l">Stopped</div></div>
+      <div class="dstat"><div class="v">{{ page.active_ads }}</div><div class="l">Active now</div></div>
+    </div>
+  </header>
+
+  <section class="drawer-block">
+    <h3 class="delta-up">New ({{ new_ads|length }})</h3>
+    {{ ad_grid(new_ads, 'Nothing new in the last scan.') }}
+    {{ change_note(page.last_new_ads, new_ads, 'new ads') }}
+  </section>
+
+  <section class="drawer-block">
+    <h3 class="delta-down">Stopped ({{ stopped_ads|length }})</h3>
+    {{ ad_grid(stopped_ads, 'Nothing stopped in the last scan.') }}
+    {{ change_note(page.last_stopped_ads, stopped_ads, 'stopped ads') }}
+  </section>
+
+  <div class="drawer-actions" style="margin-top:24px">
+    <a class="btn primary" href="/pages/{{ page.id }}">Open page</a>
+    {% if page.library_url %}
+      <a class="btn ghost" href="{{ page.library_url }}" target="_blank" rel="noopener">Ad Library ↗</a>
+    {% endif %}
+  </div>
+
+{% elif drawer_mode == 'missing' %}
+  <header class="drawer-head"><div class="nm" style="font-family:var(--display);font-size:18px;font-weight:600">Gone</div></header>
+  <p class="muted">That {{ what or 'record' }} is not in the database (any more).</p>
+{% endif %}

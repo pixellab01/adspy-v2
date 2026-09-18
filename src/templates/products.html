@@ -1,0 +1,940 @@
+{% import "_macros.html" as ui %}
+{% import "_drawer.html" as adui %}
+{% import "_transcripts.html" as tr %}
+{% from "_macros.html" import panel_open, panel_close %}
+
+{#- ---------------------------------------------------------------------------
+    Products — v1's /products tab (tabs/product/ui.py:571-607), server-rendered.
+
+    ONE template, three renderings, chosen by the variables the route passes:
+
+      drawer=True   just the product body, for static/app.js to drop into the
+                    shared drawer (route: /ui/drawer/product/<id>)
+      detail=True   the same body inside the normal shell, as a real URL
+      neither       the list screen
+
+    The conditional `extends` below is deliberate and it is why the drawer
+    fragment does not need a template of its own: when the `extends` runs, the
+    top-level output is discarded and the blocks are used; when it does not,
+    this template renders its own body. Macros defined above the `if` are
+    available either way.
+
+    Every control is a link or a form POST. v1 drove this screen from a
+    1,600-line inline script; there is none here, and the only shared JS is the
+    drawer opener in static/app.js.
+--------------------------------------------------------------------------- #}
+
+
+{# =========================================================================
+   Linked-ads table + its column picker (v1 tabs/brand_group/ui.py:1123-1141)
+   ========================================================================= #}
+{% macro ad_cell(ad, key, cell) %}
+  {%- if key == 'library_id' -%}
+    {% if ad.library_url %}<a class="page-link external" href="{{ ad.library_url }}" target="_blank" rel="noopener">{{ ad.library_id }} ↗</a>
+    {% else %}{{ ad.library_id or '—' }}{% endif %}
+  {%- elif key == 'ad_library_url' -%}
+    {% if ad.library_url %}<a class="page-link external" href="{{ ad.library_url }}" target="_blank" rel="noopener">Library ↗</a>{% else %}—{% endif %}
+  {%- elif key == 'advertiser' -%}
+    {% if ad.page_record_id %}<a class="page-link internal" href="{{ url_for('pages.detail', page_id=ad.page_record_id) }}">{{ ad.page_name }}</a>
+    {% else %}{{ ad.page_name }}{% endif %}
+  {%- elif key == 'advertiser_url' -%}
+    {% if ad.advertiser_url %}<a class="page-link external" href="{{ ad.advertiser_url }}" target="_blank" rel="noopener">Meta ↗</a>{% else %}—{% endif %}
+  {%- elif key == 'status' -%}
+    {{ ui.badge(ad.status or 'unknown') }}
+  {%- elif key == 'script_id' -%}
+    {% if ad.script_id %}{{ ui.micro_badge('S-' ~ ad.script_id, 'amber') }}{% else %}<span class="muted">—</span>{% endif %}
+  {%- elif key == 'language' -%}
+    {% if ad.language %}{{ ad.language_name }}{% else %}<span class="muted">—</span>{% endif %}
+  {%- else -%}
+    {{ cell(ad, key) or '—' }}
+  {%- endif -%}
+{% endmacro %}
+
+
+{% macro columns_picker(product, columns, all_columns, base_args) %}
+  <div class="btn-stack">
+    {% for key, label in all_columns %}
+      {% set on = key in columns %}
+      <a class="btn sm {{ 'good' if on else 'ghost' }}"
+         data-drawer="{{ url_for('products.drawer_product', product_id=product.id,
+                                 columns='1', **dict(base_args, cols=toggle_cols(columns, key)|join(','))) }}"
+         href="{{ url_for('products.detail', product_id=product.id, columns='1',
+                          **dict(base_args, cols=toggle_cols(columns, key)|join(','))) }}">
+        {{ '✓' if on else '·' }} {{ label }}
+      </a>
+    {% endfor %}
+  </div>
+  <div class="btn-row" style="margin-top:10px">
+    <span class="muted small">Order</span>
+    {% for key in columns %}
+      <span class="tag">{{ all_column_labels[key] }}
+        <a class="linklike" title="Move left"
+           href="{{ url_for('products.detail', product_id=product.id, columns='1',
+                            **dict(base_args, cols=move_cols(columns, key, -1)|join(','))) }}"
+           data-drawer="{{ url_for('products.drawer_product', product_id=product.id, columns='1',
+                            **dict(base_args, cols=move_cols(columns, key, -1)|join(','))) }}">◀</a>
+        <a class="linklike" title="Move right"
+           href="{{ url_for('products.detail', product_id=product.id, columns='1',
+                            **dict(base_args, cols=move_cols(columns, key, 1)|join(','))) }}"
+           data-drawer="{{ url_for('products.drawer_product', product_id=product.id, columns='1',
+                            **dict(base_args, cols=move_cols(columns, key, 1)|join(','))) }}">▶</a>
+      </span>
+    {% endfor %}
+    <a class="btn sm ghost" href="{{ url_for('products.detail', product_id=product.id) }}"
+       data-drawer="{{ url_for('products.drawer_product', product_id=product.id) }}">Reset</a>
+  </div>
+{% endmacro %}
+
+
+{# =========================================================================
+   Transcription panel — the only control in this app that spends money.
+
+   Rendered twice from the same macro: inline inside the product body, and on
+   its own by /ui/products/<id>/transcription so static/app.js can poll a live
+   run without re-rendering the whole drawer.
+
+   The button is disabled when no API key is configured, and it SAYS SO. v1's
+   habit of a control that looks alive and then does nothing is the thing this
+   screen is trying not to repeat.
+   ========================================================================= #}
+{% macro transcribe_panel(product, state, langs, provider, run, back, compact=false,
+                          videos=[], summary=none, video_lang='', video_languages=[],
+                          base_args={}) %}
+  {%- set refresh_job = state.refresh_job -%}
+  {%- set refresh_live = refresh_job and refresh_job.status == 'running' -%}
+  <div id="transcribe-panel"
+       data-poll-fragment="{{ url_for('products.transcription_fragment', product_id=product.id, vlang=video_lang or none) }}"
+       data-poll-live="{{ '1' if (run and run.is_live) or refresh_live else '0' }}">
+
+    {% if run %}
+      <div class="btn-row">
+        {{ ui.badge(run.status) }}
+        <span class="muted small">Run #{{ run.id }}</span>
+        {% if run.language_labels %}
+          {% for label in run.language_labels %}{{ ui.tag(label) }}{% endfor %}
+        {% else %}{{ ui.tag('All languages') }}{% endif %}
+        {% if run.provider %}{{ ui.chip(run.provider) }}{% endif %}
+        {% if run.cancelling %}{{ ui.tag('stopping after this creative') }}{% endif %}
+        {% if run.is_live and not run.cancelling %}
+          <form method="post" action="{{ url_for('products.cancel_transcription', product_id=product.id, next=back) }}">
+            <button class="btn sm ghost" type="submit" title="Stops after the creative in flight; pending ones wait for the next press">Cancel</button>
+          </form>
+        {% endif %}
+      </div>
+      {%- set run_state = 'running' if run.is_live else ('done' if run.status == 'completed' else 'error') -%}
+      {{ ui.progress(run.percent, 0, 0,
+                     run.processed ~ ' of ' ~ run.total ~ ' creatives · '
+                     ~ run.completed ~ ' transcribed · ' ~ run.deduped
+                     ~ ' reused · ' ~ run.failed ~ ' failed',
+                     run_state) }}
+      {% if run.message %}<p class="muted">{{ run.message }}</p>{% endif %}
+      {% if run.error %}{{ ui.notice(run.error, 'amber') }}{% endif %}
+      {% if run.stalled %}
+        {{ ui.notice('No progress for ' ~ run.stalled_minutes ~ ' minutes — the server may have restarted
+                      under this run. Press Generate scripts to resume it; creatives already
+                      finished are never billed again.', 'amber') }}
+      {% endif %}
+    {% endif %}
+
+    {% if refresh_job %}
+      <div class="btn-row">
+        {{ ui.badge(refresh_job.status) }}
+        <span class="muted small">Link refresh</span>
+        {{ ui.chip(refresh_job.refreshed ~ ' refreshed') }}
+        {% if refresh_job.failed %}{{ ui.chip(refresh_job.failed ~ ' failed') }}{% endif %}
+      </div>
+      {%- set refresh_pct = (100 * refresh_job.done / refresh_job.total)|round|int if refresh_job.total else (0 if refresh_live else 100) -%}
+      {{ ui.progress(refresh_pct, 0, 0,
+                     refresh_job.done ~ ' of ' ~ refresh_job.total ~ ' expired links re-read from the public Ad Library page',
+                     'running' if refresh_live else ('done' if refresh_job.status == 'completed' else 'error')) }}
+      {% if refresh_job.error %}{{ ui.notice(refresh_job.error, 'amber') }}
+      {% elif refresh_job.last_reason and refresh_job.failed %}<p class="muted">Last failure: {{ refresh_job.last_reason }}</p>{% endif %}
+    {% endif %}
+
+    {% if not compact %}
+      {{ tr.language_summary(summary) }}
+
+      <div class="true-size">
+        {{ ui.icon('info', 18) }}
+        <span>
+          <b>{{ state.done }}</b> creative{{ '' if state.done == 1 else 's' }} transcribed ·
+          <b>{{ state.to_send }}</b> still to send ·
+          <b>{{ state.pending }}</b> waiting
+          {%- if state.failed %} · <b>{{ state.failed }}</b> failed{% endif %}
+          {%- if state.guarded %} · <b>{{ state.guarded }}</b> guarded as no-speech{% endif %}.
+          {% if state.expired %}
+            <b>{{ state.expired }}</b> of the {{ state.to_send }} to send
+            {{ 'has' if state.expired == 1 else 'have' }} an expired video link — fbcdn links
+            stop working after a few hours, so they are re-read before download.
+          {% endif %}
+          {% if state.no_media %}
+            {{ state.no_media }} video ad{{ '' if state.no_media == 1 else 's' }} carry no stored
+            media URL, so there is no audio to send — those need a re-scan first.
+          {% endif %}
+          {% if state.not_video %}
+            {{ state.not_video }} ad{{ '' if state.not_video == 1 else 's' }} carry only a picture and
+            {{ 'is' if state.not_video == 1 else 'are' }} skipped.
+          {% endif %}
+        </span>
+      </div>
+
+      {% if provider.ready %}
+        <p class="muted">{{ provider.routing }}</p>
+        {% if provider.note %}{{ ui.notice(provider.note, 'amber') }}{% endif %}
+        {% if not provider.ffmpeg %}
+          {{ ui.notice('ffmpeg is not installed, so the raw video is uploaded instead of a
+                        16 kHz mono FLAC track: slower, dearer and less accurate on Indic
+                        speech. Install ffmpeg and re-run to get the good path.', 'amber') }}
+        {% endif %}
+      {% else %}
+        {{ ui.notice(provider.reason, 'amber') }}
+      {% endif %}
+
+      {#- Pre-flight: everything here is FREE. Refreshing a link opens the public
+          Ad Library page in a headless browser; detecting a language reads the
+          ad's own copy; a re-scan goes through the extension's paced queue. -#}
+      {% if state.expired or state.unknown_language_ads %}
+        <div class="btn-row">
+          <span class="muted small">Before spending</span>
+          {% if state.expired %}
+            {% if provider.refresh.available %}
+              <form method="post" action="{{ url_for('products.refresh_media', product_id=product.id, next=back) }}">
+                <button class="btn sm" type="submit" {% if refresh_live %}disabled{% endif %}
+                        title="Re-reads each expired link from the public Ad Library page in a headless browser: no login, no API call, ~3 s per video.">
+                  Refresh {{ state.expired }} expired link{{ '' if state.expired == 1 else 's' }}
+                </button>
+              </form>
+            {% else %}
+              <form method="post" action="{{ url_for('rescan.rescan_product', product_id=product.id) }}">
+                <input type="hidden" name="next" value="{{ back }}">
+                <input type="hidden" name="include_inactive" value="1">
+                <button class="btn sm" type="submit"
+                        title="{{ provider.refresh.reason }}">
+                  Re-scan pages for fresh links
+                </button>
+              </form>
+            {% endif %}
+          {% endif %}
+          {% if state.unknown_language_ads %}
+            <form method="post" action="{{ url_for('products.detect_languages', product_id=product.id, next=back) }}">
+              <button class="btn sm ghost" type="submit"
+                      title="Reads each ad's own copy (Devanagari, Tamil, Hinglish…) and records its language. Free and offline; it fills the checkboxes below.">
+                Detect languages of {{ state.unknown_language_ads }} ad{{ '' if state.unknown_language_ads == 1 else 's' }}
+              </button>
+            </form>
+          {% endif %}
+        </div>
+        {% if state.expired and not provider.refresh.available %}
+          <p class="muted small">{{ provider.refresh.reason }}</p>
+        {% endif %}
+      {% endif %}
+
+      {#- data-confirm, not onsubmit: no template in this app carries inline JS.
+          static/app.js turns it into one confirm() before the POST leaves. -#}
+      <form method="post"
+            action="{{ url_for('products.transcribe', product_id=product.id, next=back) }}"
+            data-confirm="Transcribe {{ state.to_send }} creative(s)? This calls a paid speech-to-text API ({{ provider.routing or provider.model }}) and cannot be undone once the calls are made.{% if state.expired and not provider.refresh.available %} {{ state.expired }} of them have expired video links and will fail unless refreshed or re-scanned first.{% endif %}">
+        {% if langs %}
+          <div class="btn-row">
+            <span class="muted small">Languages</span>
+            {% for row in langs %}
+              <label class="check">
+                <input type="checkbox" name="languages" value="{{ row.filter_value }}">
+                {{ row.name }} <span class="tab-count">{{ row.ads }}</span>
+              </label>
+            {% endfor %}
+            <span class="muted small">tick none for every language</span>
+          </div>
+        {% endif %}
+        <div class="btn-row">
+          {% if provider.ready and state.to_send and not (run and run.is_live) %}
+            {%- set run_title = 'Runs ' ~ provider.model ~ ', or Sarvam for Indic audio. Costs API credit.' -%}
+            {{ ui.btn('Generate scripts', kind='primary', size='sm', type='submit', title=run_title) }}
+          {% else %}
+            {{ ui.btn('Generate scripts', kind='ghost', size='sm', type='button',
+                      disabled=true,
+                      title=provider.reason or ('A run is already going for this product.' if run and run.is_live else 'Every creative for this product is already transcribed, or none of them carry a stored media URL.')) }}
+          {% endif %}
+          {% if state.failed %}
+            <button class="btn sm" type="submit"
+                    formaction="{{ url_for('products.retry_transcripts', product_id=product.id, next=back) }}">
+              Retry {{ state.failed }} failed
+            </button>
+          {% endif %}
+        </div>
+      </form>
+
+      {{ tr.videos_table(product, videos, video_lang, video_languages, back, base_args) }}
+    {% endif %}
+  </div>
+{% endmacro %}
+
+
+{# =========================================================================
+   The product body — v1's product drawer, section for section, plus the two
+   sections v1 never had: where the product runs, and what it costs to hear it.
+   ========================================================================= #}
+{% macro product_body(product, ads, columns, all_columns, columns_open, languages,
+                      language, totals, scripts_open, scripts_view, script_lang,
+                      script_languages, clusters, transcripts, cell, back,
+                      reach, brand_groups, page_rollup, ads_view, ad_cards,
+                      transcription, transcribe_languages, provider, run,
+                      videos=[], video_summary=none, video_lang='', video_languages=[]) %}
+
+  {%- set base_args = {'cols': columns|join(','), 'lang': language or none,
+                       'scripts': '1' if scripts_open else none,
+                       'view': scripts_view if scripts_view != 'grouped' else none,
+                       'ads': ads_view if ads_view != 'table' else none,
+                       'slang': script_lang or none,
+                       'vlang': video_lang or none} -%}
+
+  {#- The raw destination URL can be 300 characters of fbclid; the store
+      domain is what the eye actually wants, with the full URL on hover. -#}
+  {{ ui.drawer_head(product.product_name,
+                    meta=product.store_domain or product.product_link or 'No product URL',
+                    kicker='Exact product',
+                    name_for_avatar=product.product_name,
+                    stats=[{'value': product.active_ad_count, 'label': 'Active'},
+                           {'value': product.represented_ad_count, 'label': 'Represented'},
+                           {'value': product.age_label, 'label': 'Oldest ad age'},
+                           {'value': product.page_count, 'label': 'Pages'}]) }}
+
+  <div class="drawer-actions">
+    {% if product.product_link %}
+      <a class="btn sm primary" href="{{ product.product_link }}" target="_blank" rel="noopener">Open product ↗</a>
+    {% endif %}
+    {#- Product-wise re-scan: one page_scan job over the pages running this
+        product (pages with active ads by default), idempotent per day, pages
+        already in the queue skipped. app/routes/rescan.py flashes the result. -#}
+    <form method="post" action="{{ url_for('rescan.rescan_product', product_id=product.id) }}"
+          data-confirm="Re-scan every advertiser page running {{ product.product_name }}? One paced job is queued for the extension.">
+      <input type="hidden" name="next" value="{{ back }}">
+      <button class="btn sm" type="submit" title="Queue one scan job over this product's pages (pages with active ads; already-queued pages are skipped)">Re-scan this product's pages</button>
+    </form>
+    {% for field, on_label, off_label in [('tracked', 'Untrack', 'Track'),
+                                          ('saved', 'Un-save', 'Save'),
+                                          ('favorite', 'Un-star', 'Star'),
+                                          ('hidden', 'Unhide', 'Hide')] %}
+      {% set on = product['is_' ~ field] %}
+      <form method="post" action="{{ url_for('products.set_state', product_id=product.id, next=back) }}">
+        <input type="hidden" name="field" value="{{ field }}">
+        <input type="hidden" name="on" value="{{ '0' if on else '1' }}">
+        <button class="btn sm {{ 'good' if on else 'ghost' }}" type="submit">{{ on_label if on else off_label }}</button>
+      </form>
+    {% endfor %}
+    <form method="post" action="{{ url_for('products.remove', product_id=product.id, next=back) }}">
+      <button class="btn sm danger" type="submit">Remove permanently</button>
+    </form>
+  </div>
+
+  {#- ------------------------------------------------------------------
+      Where it runs. This is "product-wise grouping" in one block: the same
+      offer seen across every advertiser page and every brand group that runs
+      it, with the compression ratio that is the reason this tool exists —
+      278 ads are really 24 videos and 5 scripts.
+      ------------------------------------------------------------------ -#}
+  {% call ui.drawer_block('Where this product runs') %}
+    <div class="true-size">
+      {{ ui.icon('info', 18) }}
+      <span>
+        <b>{{ reach.ads }}</b> ad{{ '' if reach.ads == 1 else 's' }}
+        ({{ reach.active_ads }} active) across
+        <b>{{ reach.pages }}</b> advertiser page{{ '' if reach.pages == 1 else 's' }}
+        {%- if reach.groups %} in <b>{{ reach.groups }}</b> brand group{{ '' if reach.groups == 1 else 's' }}{% endif %} —
+        really <b>{{ reach.unique_videos }}</b> video{{ '' if reach.unique_videos == 1 else 's' }}
+        and <b>{{ reach.unique_scripts }}</b> script{{ '' if reach.unique_scripts == 1 else 's' }}.
+        {% if reach.ads_per_script > 1 %}
+          One script is carrying {{ reach.ads_per_script }} ads on average.
+        {% elif not reach.unique_scripts %}
+          No script is known yet — transcribe the videos below to find out how
+          many of these ads are the same one.
+        {% endif %}
+      </span>
+    </div>
+
+    {% if brand_groups %}
+      <div class="btn-row">
+        <span class="muted small">Brand groups</span>
+        {% for row in brand_groups %}
+          <a class="btn sm ghost" href="{{ url_for('groups.detail', group_id=row.group_id) }}"
+             title="{{ row.ads }} ads on {{ row.pages }} page(s) in this group">
+            {{ row.group_name }} <span class="tab-count">{{ row.active_ads }}</span>
+          </a>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    <div class="table-wrap">
+      <table class="tbl dense">
+        <thead>
+          <tr><th>Advertiser page</th><th class="num">Active</th><th class="num">Represented</th>
+              <th class="num">Scripts</th><th>Oldest ad</th></tr>
+        </thead>
+        <tbody>
+          {% for row in page_rollup %}
+            <tr>
+              <td><a class="page-link internal" href="{{ url_for('pages.detail', page_id=row.page_id) }}">{{ row.page_name }}</a>
+                  <small class="muted">ID {{ row.platform_page_id or '—' }}</small></td>
+              <td class="num"><span class="adcount">{{ row.active_ads }}</span></td>
+              <td class="num">{{ row.represented_ads }}</td>
+              <td class="num">{{ row.scripts or '—' }}</td>
+              <td class="muted">{{ row.oldest_day or '—' }}</td>
+            </tr>
+          {% else %}
+            {{ ui.empty_inline('No advertiser pages carry this product any more.', 5) }}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endcall %}
+
+  {% call ui.drawer_block('Product') %}
+    <table class="tbl">
+      <tbody>
+        <tr><td class="muted">Product ID</td><td>{{ product.id }}</td></tr>
+        <tr><td class="muted">Store</td><td>{{ product.store_domain or '—' }}</td></tr>
+        <tr><td class="muted">First seen</td><td>{{ (product.first_seen_at or '')[:10] or '—' }}</td></tr>
+        <tr><td class="muted">Oldest ad started</td><td>{{ product.oldest_day or '—' }}</td></tr>
+        <tr>
+          <td class="muted">Advertisers</td>
+          <td>
+            <div class="page-links">
+              {% for page in product.pages %}
+                <a class="page-link internal" href="{{ url_for('pages.detail', page_id=page.page_id) }}"
+                   title="{{ page.page_name }} - {{ page.active_ads }} active">{{ page.page_name }}</a>
+              {% else %}<span class="muted">No advertiser pages</span>{% endfor %}
+            </div>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  {% endcall %}
+
+  {% call ui.drawer_block('Linked ads') %}
+    <div class="btn-row">
+      {% if provider.ready and transcription.to_send %}
+        {{ ui.btn('Generate scripts', kind='primary', size='sm', href='#transcribe-panel',
+                  title='Jump to the transcription panel') }}
+      {% else %}
+        {{ ui.btn('Generate scripts', kind='ghost', size='sm', type='button', disabled=true,
+                  title=provider.reason or 'No transcribable video ads for this product yet.') }}
+      {% endif %}
+      <a class="btn sm {{ 'good' if columns_open else 'ghost' }}"
+         href="{{ url_for('products.detail', product_id=product.id, **dict(base_args, columns=none if columns_open else '1')) }}"
+         data-drawer="{{ url_for('products.drawer_product', product_id=product.id, **dict(base_args, columns=none if columns_open else '1')) }}">Columns</a>
+      <a class="btn sm" href="{{ url_for('products.export_linked_ads', product_id=product.id,
+                                         cols=columns|join(','), lang=language or none) }}"
+         download>Export CSV</a>
+      <a class="btn sm {{ 'good' if scripts_open else 'ghost' }}"
+         href="{{ url_for('products.detail', product_id=product.id, **dict(base_args, scripts=none if scripts_open else '1')) }}"
+         data-drawer="{{ url_for('products.drawer_product', product_id=product.id, **dict(base_args, scripts=none if scripts_open else '1')) }}">Scripts</a>
+      <a class="btn sm {{ 'good' if ads_view == 'cards' else 'ghost' }}"
+         href="{{ url_for('products.detail', product_id=product.id, **dict(base_args, ads=none if ads_view == 'cards' else 'cards')) }}"
+         data-drawer="{{ url_for('products.drawer_product', product_id=product.id, **dict(base_args, ads=none if ads_view == 'cards' else 'cards')) }}"
+         title="See the creatives themselves instead of the column table">Creatives</a>
+      <span class="result-count">{{ ads|length }} ads shown</span>
+    </div>
+
+    {% if columns_open %}
+      {{ columns_picker(product, columns, all_columns, base_args) }}
+    {% endif %}
+
+    {#- "Ek hi video/script kai ads par chalta hai": v1's totals strip. -#}
+    <div class="true-size">
+      {{ ui.icon('info', 18) }}
+      <span><b>{{ totals.ads }}</b> linked ads · <b>{{ totals.video_ads }}</b> video ·
+        <b>{{ totals.unique_videos }}</b> unique videos ·
+        <b>{{ totals.unique_scripts }}</b> unique scripts.
+        {% if totals.untranscribed_video_ads %}
+          {{ totals.untranscribed_video_ads }} video ad{{ '' if totals.untranscribed_video_ads == 1 else 's' }}
+          not transcribed yet.
+        {% endif %}
+      </span>
+    </div>
+
+    <div class="btn-row">
+      <a class="btn sm {{ 'ghost' if language else 'good' }}"
+         href="{{ url_for('products.detail', product_id=product.id, **dict(base_args, lang=none)) }}"
+         data-drawer="{{ url_for('products.drawer_product', product_id=product.id, **dict(base_args, lang=none)) }}">All languages</a>
+      {% for row in languages %}
+        <a class="btn sm {{ 'good' if language == row.code else 'ghost' }}"
+           href="{{ url_for('products.detail', product_id=product.id, **dict(base_args, lang=row.code)) }}"
+           data-drawer="{{ url_for('products.drawer_product', product_id=product.id, **dict(base_args, lang=row.code)) }}">{{ row.name }} <span class="tab-count">{{ row.ads }}</span></a>
+      {% endfor %}
+    </div>
+
+    {% if ads_view == 'cards' %}
+      {#- One ad tile in this app, and it lives in _drawer.html. -#}
+      {{ adui.ad_grid(ad_cards, 'No linked ads in this language.') }}
+    {% else %}
+      <div class="table-wrap">
+        <table class="tbl">
+          <thead>
+            <tr>{% for key in columns %}<th{{ ' class="num"'|safe if key in ('ad_id', 'age') }}>{{ all_column_labels[key] }}</th>{% endfor %}</tr>
+          </thead>
+          <tbody>
+            {% for ad in ads %}
+              <tr>{% for key in columns %}<td{{ ' class="num"'|safe if key in ('ad_id', 'age') }}>{{ ad_cell(ad, key, cell) }}</td>{% endfor %}</tr>
+            {% else %}
+              {{ ui.empty_inline('No linked ads in this language.' if language else 'No linked ads for this product.', columns|length) }}
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+  {% endcall %}
+
+  {#- Transcription + the per-video table, one block: which language each video
+      speaks, how long it is, what it says, and which other ads say the same.
+      The whole block is what static/app.js re-fetches while a run is live, so
+      rows fill in as creatives finish. -#}
+  {% call ui.drawer_block('Transcription · videos') %}
+    {{ transcribe_panel(product, transcription, transcribe_languages, provider, run, back,
+                        videos=videos, summary=video_summary, video_lang=video_lang,
+                        video_languages=video_languages, base_args=base_args) }}
+  {% endcall %}
+
+  {% if scripts_open %}
+    {% call ui.drawer_block('Scripts') %}
+      <div class="btn-row">
+        <a class="btn sm {{ 'good' if scripts_view == 'grouped' else 'ghost' }}"
+           href="{{ url_for('products.detail', product_id=product.id, **dict(base_args, view=none)) }}"
+           data-drawer="{{ url_for('products.drawer_product', product_id=product.id, **dict(base_args, view=none)) }}">Grouped</a>
+        <a class="btn sm {{ 'good' if scripts_view == 'flat' else 'ghost' }}"
+           href="{{ url_for('products.detail', product_id=product.id, **dict(base_args, view='flat')) }}"
+           data-drawer="{{ url_for('products.drawer_product', product_id=product.id, **dict(base_args, view='flat')) }}">All transcripts</a>
+        <a class="btn sm" href="{{ url_for('products.export_scripts', product_id=product.id, slang=script_lang or none) }}" download>Download .txt</a>
+      </div>
+
+      <div class="btn-row">
+        <a class="btn sm {{ 'ghost' if script_lang else 'good' }}"
+           href="{{ url_for('products.detail', product_id=product.id, **dict(base_args, slang=none)) }}"
+           data-drawer="{{ url_for('products.drawer_product', product_id=product.id, **dict(base_args, slang=none)) }}">All</a>
+        {% for row in script_languages %}
+          <a class="btn sm {{ 'good' if script_lang == row.code else 'ghost' }}"
+             href="{{ url_for('products.detail', product_id=product.id, **dict(base_args, slang=row.code)) }}"
+             data-drawer="{{ url_for('products.drawer_product', product_id=product.id, **dict(base_args, slang=row.code)) }}"
+             title="{{ row.scripts }} script{{ '' if row.scripts == 1 else 's' }} across {{ row.transcripts }} transcript{{ '' if row.transcripts == 1 else 's' }}">{{ row.name }} <span class="tab-count">{{ row.transcripts }}</span></a>
+        {% endfor %}
+      </div>
+
+      {% if scripts_view == 'grouped' %}
+        {% for cluster in clusters %}
+          <section class="drawer-block">
+            <div class="btn-row">
+              {{ ui.micro_badge(cluster.script_label, 'amber') }}
+              <strong>Script #{{ cluster.index }}</strong>
+              {{ ui.tag(cluster.language_name) }}
+              {{ ui.chip(cluster.ad_count ~ ' ads') }}
+              {{ ui.chip(cluster.page_count ~ ' pages') }}
+              {% if cluster.variant_count > 1 %}{{ ui.chip(cluster.variant_count ~ ' variants') }}{% endif %}
+            </div>
+            {% if cluster.hook %}<p class="muted">{{ cluster.hook }}</p>{% endif %}
+            {% if cluster.representative %}
+              <details><summary>Representative transcript</summary><pre class="json-code">{{ cluster.representative }}</pre></details>
+            {% endif %}
+            {% if cluster.library_ids %}
+              <details><summary>{{ cluster.library_ids|length }} library ID{{ '' if cluster.library_ids|length == 1 else 's' }}</summary>
+                <div class="btn-row">
+                  {% for library_id in cluster.library_ids %}
+                    <a class="page-link external" href="https://www.facebook.com/ads/library/?id={{ library_id }}" target="_blank" rel="noopener">{{ library_id }} ↗</a>
+                  {% endfor %}
+                </div>
+              </details>
+            {% endif %}
+          </section>
+        {% else %}
+          {{ ui.empty_two('No script clusters yet.',
+                          'Transcribe this product’s videos above and its scripts appear here — one card per distinct spoken script, however many ads carry it.') }}
+        {% endfor %}
+      {% else %}
+        {% for row in transcripts %}
+          <section class="drawer-block">
+            <div class="btn-row">
+              {% if row.script_label %}{{ ui.micro_badge(row.script_label, 'amber') }}{% endif %}
+              {{ ui.tag(row.language_name) }}
+              {{ ui.badge(row.status) }}
+              {% if row.low_confidence %}{{ ui.tag('guarded: no clear speech') }}{% endif %}
+              {% if row.library_id %}<a class="page-link external" href="https://www.facebook.com/ads/library/?id={{ row.library_id }}" target="_blank" rel="noopener">{{ row.library_id }} ↗</a>{% endif %}
+              {{ ui.chip(row.ad_count ~ ' ads') }}
+            </div>
+            {% if row.hook %}<p class="muted">{{ row.hook }}</p>{% endif %}
+            {% if row.transcript %}<pre class="json-code">{{ row.transcript }}</pre>{% endif %}
+          </section>
+        {% else %}
+          {{ ui.empty_two('No transcripts for this product yet.',
+                          'Press Generate scripts in the Transcription panel above.') }}
+        {% endfor %}
+      {% endif %}
+    {% endcall %}
+  {% endif %}
+{% endmacro %}
+
+
+{# ======================================================================== #}
+{#- A fourth rendering: just the transcription panel, for static/app.js to swap
+    in while a run is live (route: /ui/products/<id>/transcription). It is the
+    same macro as the inline one, so a live run and a finished one can never
+    disagree about what they look like. -#}
+{% if transcription_panel %}
+  {% if product %}
+    {{ transcribe_panel(product, transcription, transcribe_languages, provider, run,
+                        url_for('products.index'),
+                        videos=videos, summary=video_summary, video_lang=video_lang,
+                        video_languages=video_languages) }}
+  {% else %}
+    {{ ui.empty_inline('That product is gone.') }}
+  {% endif %}
+{% elif drawer %}
+  {% if missing %}
+    {{ ui.empty_state('That product is gone.', 'It was removed, or the link is stale.') }}
+  {% else %}
+    {{ product_body(product, ads, columns, all_columns, columns_open, languages,
+                    language, totals, scripts_open, scripts_view, script_lang,
+                    script_languages, clusters, transcripts, cell, back,
+                    reach, brand_groups, page_rollup, ads_view, ad_cards,
+                    transcription, transcribe_languages, provider, run,
+                    videos=videos, video_summary=video_summary, video_lang=video_lang,
+                    video_languages=video_languages) }}
+  {% endif %}
+{% else %}
+{% extends "base.html" %}
+
+{% block title %}Products - Pixellab Ad Spy{% endblock %}
+{% block heading %}Products{% endblock %}
+
+{% block content %}
+{% if detail %}
+
+  {% set detail_actions %}<a class="btn sm ghost" href="{{ url_for('products.index') }}">Back to products</a>{% endset %}
+  {{ panel_open(actions=detail_actions, pad=true) }}
+    {{ product_body(product, ads, columns, all_columns, columns_open, languages,
+                    language, totals, scripts_open, scripts_view, script_lang,
+                    script_languages, clusters, transcripts, cell, back,
+                    reach, brand_groups, page_rollup, ads_view, ad_cards,
+                    transcription, transcribe_languages, provider, run,
+                    videos=videos, video_summary=video_summary, video_lang=video_lang,
+                    video_languages=video_languages) }}
+  {{ panel_close() }}
+
+{% else %}
+
+{#- v1's tab row, in v1's order, with v1's counts. "Extract All" sits at the
+    end of the same row; extraction is not wired in v2 yet, so it is disabled
+    with the reason on it rather than quietly missing. -#}
+<section class="section-toolbar">
+  {{ ui.pill_tabs([
+       ('page_wise',  'Page-Wise', url_for('products.index', **list_args(ctx, section='page_wise', page=none)), summary.pages),
+       ('page_sets',  'Page sets', url_for('products.index', **list_args(ctx, section='page_sets', page=none)), summary.page_sets),
+       ('full',       'Full List', url_for('products.index', **list_args(ctx, section='full', page=none)), summary.full),
+       ('tracked',    'Tracked',   url_for('products.index', **list_args(ctx, section='tracked', page=none)), summary.tracked),
+       ('saved',      'Saved',     url_for('products.index', **list_args(ctx, section='saved', page=none)), summary.saved),
+       ('favorite',   'Favorite',  url_for('products.index', **list_args(ctx, section='favorite', page=none)), summary.favorite),
+       ('hidden',     'Hidden',    url_for('products.index', **list_args(ctx, section='hidden', page=none)), summary.hidden)
+     ], ctx.section, aria='Product sections') }}
+  {{ ui.btn('Extract All', kind='primary', size='sm', type='button',
+            disabled=true, title=extract_note) }}
+</section>
+
+<div class="{{ 'groups-layout' if ctx.section == 'page_wise' else '' }}">
+
+  {% if ctx.section == 'page_wise' %}
+    {#- v1's left "Advertiser pages" picker. Ticking pages narrows the product
+        list to those pages; the same checkboxes feed "Save pages" and
+        "Save as set" via formaction, so there is one selection, not three. -#}
+    <form class="group-rail" method="get" action="{{ url_for('products.index') }}">
+      <input type="hidden" name="section" value="page_wise">
+      <input type="hidden" name="sort" value="{{ ctx.sort }}">
+      {% if ctx.search %}<input type="hidden" name="q" value="{{ ctx.search }}">{% endif %}
+
+      <div class="group-rail-head">
+        <h3>Advertiser pages</h3>
+        <span class="result-count">{{ ctx.page_ids|length }} selected</span>
+      </div>
+
+      <div class="panel-body pad">
+        <div class="inline-form">
+          <input type="search" name="pq" value="{{ ctx.picker_search }}" placeholder="Search page, alias or Meta ID" size="18">
+          <button class="btn sm" type="submit">Find</button>
+        </div>
+
+        <div class="btn-row" style="margin-top:10px">
+          <label class="check"><input type="checkbox" id="select-all"> Select visible</label>
+          <a class="btn sm ghost" href="{{ url_for('products.index', **list_args(ctx, page_ids=none, page=none)) }}">Clear selection</a>
+        </div>
+
+        <div class="page-check-list">
+          {% for page in picker['items'] %}
+            <label class="page-check">
+              <input type="checkbox" class="row-check" name="page_ids" value="{{ page.id }}"
+                     {{ 'checked' if page.id in ctx.page_ids }}>
+              <span>
+                <strong>{{ page.page_name }}</strong>
+                <small class="muted">ID {{ page.platform_page_id }} · {{ page.active_ads }} active · {{ page.product_count }} products{{ ' · saved' if page.is_saved }}</small>
+              </span>
+            </label>
+          {% else %}
+            {{ ui.empty_inline('No pages match that search.') }}
+          {% endfor %}
+        </div>
+
+        <div class="btn-row" style="margin-top:10px">
+          <button class="btn primary sm" type="submit">Apply pages</button>
+          <button class="btn sm" type="submit" formmethod="post"
+                  formaction="{{ url_for('products.save_pages', next=request.full_path) }}">Save pages</button>
+        </div>
+
+        <div class="field" style="margin-top:12px">
+          <label for="set-name">Save as set <span class="field-hint">(name it first)</span></label>
+          <input class="input-lg" id="set-name" type="text" name="name" placeholder="Example: Naaptol">
+        </div>
+        <button class="btn sm" type="submit" formmethod="post"
+                formaction="{{ url_for('products.create_page_set', next=request.full_path) }}">Save as set</button>
+
+        {{ ui.pagination(picker.start, picker.end, picker.total,
+             url_for('products.index', **list_args(ctx, pp=picker.page - 1)) if picker.has_previous else none,
+             url_for('products.index', **list_args(ctx, pp=picker.page + 1)) if picker.has_next else none,
+             picker.page, picker.pages, 'pages') }}
+      </div>
+    </form>
+  {% endif %}
+
+  {#- min-width:0 or a wide table stretches the grid instead of
+      scrolling inside its own panel. -#}
+  <div style="min-width:0">
+
+  {% if ctx.section == 'page_sets' %}
+
+    {% set set_actions %}{{ ui.tag(page_sets|length ~ ' sets') }}{% endset %}
+    {{ panel_open('Saved page sets',
+                  desc='A set is a named group of advertiser pages you keep coming back to. Open one to scope the product list to it.',
+                  actions=set_actions, scroll=true) }}
+      <table class="tbl">
+        <thead><tr><th>Set</th><th>Pages</th><th class="num">Count</th><th>Updated</th><th class="right">Actions</th></tr></thead>
+        <tbody>
+          {% for row in page_sets %}
+            <tr data-searchable data-search-text="{{ row.name }} {{ row.preview }}">
+              <td><strong>{{ row.name }}</strong></td>
+              <td class="wrap muted">{{ row.preview }}</td>
+              <td class="num">{{ row.page_count }}</td>
+              <td class="muted">{{ (row.updated_at or row.created_at or '')[:10] }}</td>
+              <td class="right nowrap">
+                <div class="btn-row" style="justify-content:flex-end;flex-wrap:nowrap">
+                  <a class="btn sm" href="{{ url_for('products.index', section='page_wise', page_ids=row.page_ids) }}">Open</a>
+                  <form method="post" action="{{ url_for('products.delete_page_set', set_id=row.id, next=request.full_path) }}">
+                    <button class="btn sm danger" type="submit">Delete</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+          {% else %}
+            {{ ui.empty_two('No page sets yet.', 'Tick pages on the Page-Wise tab and use "Save as set".', colspan=5) }}
+          {% endfor %}
+        </tbody>
+      </table>
+    {{ panel_close() }}
+
+  {% else %}
+
+    {% if ctx.section == 'page_wise' and selected_pages %}
+      <div class="bulk-bar">
+        <span class="muted small">Selected pages</span>
+        {% for page in selected_pages %}
+          {{ ui.chip(page.page_name, 'prod') }}
+        {% endfor %}
+        <a class="btn sm ghost" href="{{ url_for('products.index', **list_args(ctx, page_ids=none, page=none)) }}">Clear</a>
+      </div>
+    {% elif ctx.section == 'page_wise' %}
+      {{ ui.queue_hint('Showing every product. Tick advertiser pages on the left to narrow this list to them.') }}
+    {% endif %}
+
+    {#- v1's tools row: search | sort | Advanced filters. -#}
+    <section class="screen-toolbar">
+      <form class="inline-form" method="get" action="{{ url_for('products.index') }}">
+        <input type="hidden" name="section" value="{{ ctx.section }}">
+        {% for page_id in ctx.page_ids %}<input type="hidden" name="page_ids" value="{{ page_id }}">{% endfor %}
+        <input type="search" name="q" value="{{ ctx.search }}" placeholder="Search product, advertiser or store" size="26">
+        <select name="sort" aria-label="Sort products">
+          {% for key, label in sort_options %}
+            <option value="{{ key }}" {{ 'selected' if ctx.sort == key }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+        {% for key in ('ad_status', 'media_type', 'has_url') %}
+          {% if ctx.filters[key] != 'all' %}<input type="hidden" name="{{ key }}" value="{{ ctx.filters[key] }}">{% endif %}
+        {% endfor %}
+        {% for key in ('min_active', 'max_active', 'min_represented', 'max_represented',
+                       'min_age', 'max_age', 'min_pages', 'max_pages') %}
+          {% if ctx.filters[key] is not none %}<input type="hidden" name="{{ key }}" value="{{ ctx.filters[key] }}">{% endif %}
+        {% endfor %}
+        <button class="btn" type="submit">Apply</button>
+        <a class="btn {{ 'good' if filter_count else 'ghost' }}"
+           href="{{ url_for('products.index', **list_args(ctx, filters=none if ctx.show_filters else '1')) }}">
+          Advanced filters{% if filter_count %} <span class="tab-count">{{ filter_count }}</span>{% endif %}
+        </a>
+      </form>
+      <span class="result-count">{{ result.total }} products</span>
+    </section>
+
+    {% if ctx.show_filters %}
+      {{ panel_open('Detailed filters',
+                    desc='Age is calculated only from Meta ad start_date. Extraction dates are never used.',
+                    pad=true) }}
+        <form method="get" action="{{ url_for('products.index') }}">
+          <input type="hidden" name="section" value="{{ ctx.section }}">
+          <input type="hidden" name="sort" value="{{ ctx.sort }}">
+          <input type="hidden" name="filters" value="1">
+          {% if ctx.search %}<input type="hidden" name="q" value="{{ ctx.search }}">{% endif %}
+          {% for page_id in ctx.page_ids %}<input type="hidden" name="page_ids" value="{{ page_id }}">{% endfor %}
+
+          <div class="row-2">
+            <div class="field">
+              <label>Active ads</label>
+              <div class="inline-form">
+                <input type="number" min="0" name="min_active" value="{{ ctx.filters.min_active if ctx.filters.min_active is not none }}" placeholder="Min">
+                <input type="number" min="0" name="max_active" value="{{ ctx.filters.max_active if ctx.filters.max_active is not none }}" placeholder="Max">
+              </div>
+            </div>
+            <div class="field">
+              <label>Represented ads</label>
+              <div class="inline-form">
+                <input type="number" min="0" name="min_represented" value="{{ ctx.filters.min_represented if ctx.filters.min_represented is not none }}" placeholder="Min">
+                <input type="number" min="0" name="max_represented" value="{{ ctx.filters.max_represented if ctx.filters.max_represented is not none }}" placeholder="Max">
+              </div>
+            </div>
+            <div class="field">
+              <label>Ad age (days)</label>
+              <div class="inline-form">
+                <input type="number" min="1" name="min_age" value="{{ ctx.filters.min_age if ctx.filters.min_age is not none }}" placeholder="Min">
+                <input type="number" min="1" name="max_age" value="{{ ctx.filters.max_age if ctx.filters.max_age is not none }}" placeholder="Max">
+              </div>
+            </div>
+            <div class="field">
+              <label>Advertiser pages</label>
+              <div class="inline-form">
+                <input type="number" min="0" name="min_pages" value="{{ ctx.filters.min_pages if ctx.filters.min_pages is not none }}" placeholder="Min">
+                <input type="number" min="0" name="max_pages" value="{{ ctx.filters.max_pages if ctx.filters.max_pages is not none }}" placeholder="Max">
+              </div>
+            </div>
+            <div class="field">
+              <label for="ad-status">Ad status</label>
+              <select id="ad-status" name="ad_status">
+                {% for key, label in ad_status_options %}
+                  <option value="{{ key }}" {{ 'selected' if ctx.filters.ad_status == key }}>{{ label }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="field">
+              <label>Media / link</label>
+              <div class="inline-form">
+                <select name="media_type" aria-label="Media type">
+                  {% for key, label in media_type_options %}
+                    <option value="{{ key }}" {{ 'selected' if ctx.filters.media_type == key }}>{{ label }}</option>
+                  {% endfor %}
+                </select>
+                <select name="has_url" aria-label="Has URL">
+                  {% for key, label in has_url_options %}
+                    <option value="{{ key }}" {{ 'selected' if ctx.filters.has_url == key }}>{{ label }}</option>
+                  {% endfor %}
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="btn-row">
+            <a class="btn ghost" href="{{ url_for('products.index', section=ctx.section, sort=ctx.sort, q=ctx.search or none, page_ids=ctx.page_ids or none, filters='1') }}">Reset</a>
+            <button class="btn primary" type="submit">Apply filters</button>
+          </div>
+        </form>
+      {{ panel_close() }}
+    {% endif %}
+
+    {% set head_actions %}{{ ui.tag(result['items']|length ~ ' rows') }}{% endset %}
+    {{ panel_open('Products', desc='Ad age uses the original Meta ad start date, never the day we scraped it.',
+                  actions=head_actions, scroll=true) }}
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th>Product</th>
+            <th>Advertiser</th>
+            <th class="num">Active</th>
+            <th class="num">Represented</th>
+            <th class="num">Ad age</th>
+            <th class="num">Pages</th>
+            <th class="right">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for product in result['items'] %}
+            <tr data-searchable data-search-text="{{ product.product_name }} {{ product.store_domain }}">
+              {#- THE ROW OPENS A DRAWER. data-drawer sits on the cell, not on
+                  the <tr>: a click anywhere in the product-name cell (including
+                  the link) is intercepted by static/app.js and slides the drawer
+                  in, while the row's own Track/Save/Hide/Remove buttons keep
+                  submitting normally. The href stays a real deep link, so
+                  cmd-click, middle-click, "copy link" and a JS-less browser all
+                  still land on /products/<id>. -#}
+              <td class="col-product"
+                  data-drawer="{{ url_for('products.drawer_product', product_id=product.id) }}"
+                  title="Open {{ product.product_name }}">
+                {{ ui.page_cell(product.product_name,
+                                meta=(product.store_domain or (product.product_link | short_url) or 'store unknown') ~ ' - ' ~ product.media_summary,
+                                meta_title=product.product_link or '',
+                                href=url_for('products.detail', product_id=product.id)) }}
+              </td>
+              <td class="wrap">
+                {% for page in product.pages[:1] %}
+                  <a class="page-link internal" href="{{ url_for('pages.detail', page_id=page.page_id) }}">{{ page.page_name }}</a>
+                {% else %}<span class="muted">Unknown page</span>{% endfor %}
+                {% if product.pages|length > 1 %}{{ ui.chip('+' ~ (product.pages|length - 1)) }}{% endif %}
+              </td>
+              <td class="num"><span class="adcount">{{ product.active_ad_count }}</span></td>
+              <td class="num">{{ product.represented_ad_count }}</td>
+              <td class="num" title="Started {{ product.oldest_day or 'unknown' }}">
+                {{ product.age_label }}<br><small class="muted">{{ product.oldest_day }}</small>
+              </td>
+              <td class="num">{{ product.page_count }}</td>
+              <td class="right nowrap">
+                <div class="btn-row" style="justify-content:flex-end;flex-wrap:nowrap">
+                  {% for field, on_label, off_label in [('tracked', 'Untrack', 'Track'),
+                                                        ('saved', 'Un-save', 'Save'),
+                                                        ('favorite', 'Un-star', 'Favorite'),
+                                                        ('hidden', 'Unhide', 'Hide')] %}
+                    {% set on = product['is_' ~ field] %}
+                    <form method="post" action="{{ url_for('products.set_state', product_id=product.id, next=request.full_path) }}">
+                      <input type="hidden" name="field" value="{{ field }}">
+                      <input type="hidden" name="on" value="{{ '0' if on else '1' }}">
+                      <button class="btn sm {{ 'good' if on else 'ghost' }}" type="submit">{{ on_label if on else off_label }}</button>
+                    </form>
+                  {% endfor %}
+                  <form method="post" action="{{ url_for('products.remove', product_id=product.id, next=request.full_path) }}">
+                    <button class="btn sm danger" type="submit" title="Remove permanently">×</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+          {% else %}
+            {% if ctx.search or filter_count %}
+              {{ ui.empty_two('Nothing matches those filters.', 'Clear the search or reset the advanced filters.', colspan=7) }}
+            {% elif ctx.section in ('tracked', 'saved', 'favorite', 'hidden') %}
+              {{ ui.empty_two('No ' ~ ctx.section ~ ' products yet.', 'Use the row buttons on Full List to put products here.', colspan=7) }}
+            {% else %}
+              {{ ui.empty_two('No products yet.', 'Products appear once ads carry a destination URL.', colspan=7) }}
+            {% endif %}
+          {% endfor %}
+        </tbody>
+      </table>
+    {{ panel_close() }}
+
+    {{ ui.pagination(result.start, result.end, result.total,
+         url_for('products.index', **list_args(ctx, page=result.page - 1)) if result.has_previous else none,
+         url_for('products.index', **list_args(ctx, page=result.page + 1)) if result.has_next else none,
+         result.page, result.pages, 'products') }}
+
+  {% endif %}
+  </div>
+</div>
+
+{{ ui.drawer_mount('Product details') }}
+{% endif %}
+{% endblock %}
+{% endif %}

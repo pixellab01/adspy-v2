@@ -1,0 +1,191 @@
+{% import "_macros.html" as ui %}
+{% from "_macros.html" import panel_open, panel_close %}
+{% extends "base.html" %}
+
+{#- ---------------------------------------------------------------------------
+    Brand Groups, list view — v1's tabs/brand_group/ui.py:370-381 shell: a
+    238px group rail on the left, the working pane on the right. With nothing
+    selected the pane is v1's "Select a brand group" prompt plus the New-group
+    form (v1 opens the same form in a modal).
+
+    The rail macro lives here and group_detail.html imports it, so the two
+    screens can never drift apart.
+--------------------------------------------------------------------------- #}
+
+
+{% macro group_rail(groups, current_id, group_sort, group_search,
+                    group_sort_options, rail_total) %}
+<aside class="group-rail">
+  <div class="group-rail-head">
+    <h3>Brand groups</h3>
+    <a class="btn sm primary" href="{{ url_for('groups.index', new='1', gsort=group_sort, gq=group_search or none) }}">New</a>
+  </div>
+
+  <div class="panel-body pad">
+    <form class="inline-form" method="get" action="{{ url_for('groups.index') if not current_id else url_for('groups.detail', group_id=current_id) }}">
+      <input type="search" name="gq" value="{{ group_search }}" placeholder="Search groups" size="12">
+      <select name="gsort" aria-label="Sort brand groups">
+        {% for key, label in group_sort_options %}
+          <option value="{{ key }}" {{ 'selected' if group_sort == key }}>{{ label }}</option>
+        {% endfor %}
+      </select>
+      <button class="btn sm" type="submit">Sort</button>
+    </form>
+    <div class="muted small" style="margin-top:8px">{{ groups|length }} groups · {{ rail_total }} page links</div>
+  </div>
+
+  {% for group in groups %}
+    <a class="group-item{{ ' active' if current_id == group.id }}"
+       href="{{ url_for('groups.detail', group_id=group.id, gsort=group_sort, gq=group_search or none) }}">
+      <div class="gi-top">
+        <span class="gi-site">{{ ui.icon('brand_group', 13) }}{{ group.name }}</span>
+        <span class="gi-ads">{{ group.live_ads }}</span>
+      </div>
+      <div class="gi-bot">
+        <span class="gi-count">{{ group.page_count }} pages · {{ group.product_count }} products</span>
+        <span class="avatar-stack">
+          {% for name in group.members %}{{ ui.mini_avatar(name) }}{% endfor %}
+        </span>
+      </div>
+    </a>
+  {% else %}
+    {{ ui.empty_inline('No brand groups yet.') }}
+  {% endfor %}
+</aside>
+{% endmacro %}
+
+
+{#- The Add-pages picker. Used by the New-group form here and by the Edit /
+    Add pages forms on the detail screen, so both write the same field name. -#}
+{% macro page_picker(action_url, picker_scope, picker_sort, picker_search,
+                     picker_scopes, picker_sorts, picker_pages) %}
+  <form class="inline-form" method="get" action="{{ action_url }}">
+    {% for key, value in request.args.items() %}
+      {% if key not in ('psearch', 'scope', 'psort') %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endif %}
+    {% endfor %}
+    <input type="search" name="psearch" value="{{ picker_search }}" placeholder="Search pages" size="20">
+    <select name="scope" aria-label="Page scope">
+      {% for key, label in picker_scopes %}
+        <option value="{{ key }}" {{ 'selected' if picker_scope == key }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <select name="psort" aria-label="Sort pages">
+      {% for key, label in picker_sorts %}
+        <option value="{{ key }}" {{ 'selected' if picker_sort == key }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <button class="btn sm" type="submit">Find</button>
+  </form>
+
+  <div class="page-check-list" style="margin-top:10px">
+    {% for page in picker_pages %}
+      <label class="page-check">
+        <input type="checkbox" class="row-check" name="page_ids" value="{{ page.id }}" {{ 'checked' if page.in_group }}>
+        <span>
+          <strong>{{ page.page_name }}</strong>
+          <small class="muted">ID {{ page.platform_page_id }} · {{ page.active_ads }} active · {{ page.represented_ads }} represented</small>
+        </span>
+      </label>
+    {% else %}
+      {{ ui.empty_inline('No pages match that scope.') }}
+    {% endfor %}
+  </div>
+{% endmacro %}
+
+
+{% block title %}Brand Groups - Pixellab Ad Spy{% endblock %}
+{% block heading %}Brand Groups{% endblock %}
+
+{% block content %}
+<div class="groups-layout">
+  {{ group_rail(groups, none, group_sort, group_search, group_sort_options, rail_total) }}
+
+  <div style="min-width:0">
+    {% if new_open %}
+      {{ panel_open('New brand group',
+                    desc='One brand, many advertiser pages. Group them once and every number on the detail screen adds up across all of them.',
+                    pad=true) }}
+        <form method="post" action="{{ url_for('groups.create') }}">
+          <div class="row-2">
+            <div class="field">
+              <label for="g-name">Name</label>
+              <input class="input-lg" id="g-name" type="text" name="name" required placeholder="Naaptol">
+            </div>
+            <div class="field">
+              <label for="g-domain">Primary domain</label>
+              <input class="input-lg" id="g-domain" type="text" name="primary_domain" placeholder="naaptol.co.in">
+            </div>
+            <div class="field">
+              <label for="g-category">Category</label>
+              <input class="input-lg" id="g-category" type="text" name="category" placeholder="Marketplace">
+            </div>
+            <div class="field">
+              <label for="g-notes">Notes</label>
+              <input class="input-lg" id="g-notes" type="text" name="notes" placeholder="Anything worth remembering">
+            </div>
+          </div>
+
+          <div class="section-toolbar">
+            <strong>Add pages</strong>
+            <label class="check"><input type="checkbox" id="select-all"> Select all results</label>
+          </div>
+          {{ page_picker(url_for('groups.index'), picker_scope, picker_sort, picker_search,
+                         picker_scopes, picker_sorts, picker_pages) }}
+
+          <div class="btn-row" style="margin-top:14px">
+            <a class="btn ghost" href="{{ url_for('groups.index') }}">Cancel</a>
+            <button class="btn primary" type="submit">Save</button>
+          </div>
+        </form>
+      {{ panel_close() }}
+    {% else %}
+      {{ panel_open('Select a brand group',
+                    desc='Pages and products will appear here.', pad=true) }}
+        {% if groups %}
+          {{ ui.empty_state('Pick a group on the left.',
+                            'Or start a new one — a group is just a set of advertiser pages that belong to the same brand.') }}
+        {% else %}
+          {{ ui.empty_state('No brand groups yet.',
+                            'Create one, add the advertiser pages that belong to the brand, and the detail screen totals them up.') }}
+        {% endif %}
+      {{ panel_close() }}
+
+      {% set head_actions %}{{ ui.tag(groups|length ~ ' groups') }}{% endset %}
+      {{ panel_open('All brand groups', actions=head_actions, scroll=true) }}
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th>Group</th><th>Primary domain</th>
+              <th class="num">Pages</th><th class="num">Active ads</th>
+              <th class="num">Products</th><th>Updated</th><th class="right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for group in groups %}
+              <tr data-searchable data-search-text="{{ group.name }} {{ group.primary_domain }}">
+                <td>{{ ui.page_cell(group.name, meta=group.category or 'No category',
+                                    href=url_for('groups.detail', group_id=group.id)) }}</td>
+                <td class="muted">{{ group.primary_domain or '—' }}</td>
+                <td class="num">{{ group.page_count }}</td>
+                <td class="num"><span class="adcount">{{ group.live_ads }}</span></td>
+                <td class="num">{{ group.product_count }}</td>
+                <td class="muted">{{ (group.updated_at or group.created_at or '')[:10] }}</td>
+                <td class="right nowrap">
+                  <div class="btn-row" style="justify-content:flex-end;flex-wrap:nowrap">
+                    <a class="btn sm" href="{{ url_for('groups.detail', group_id=group.id) }}">Open</a>
+                    <form method="post" action="{{ url_for('groups.delete', group_id=group.id) }}">
+                      <button class="btn sm danger" type="submit">Delete</button>
+                    </form>
+                  </div>
+                </td>
+              </tr>
+            {% else %}
+              {{ ui.empty_two('No brand groups yet.', 'Use New to create the first one.', colspan=7) }}
+            {% endfor %}
+          </tbody>
+        </table>
+      {{ panel_close() }}
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

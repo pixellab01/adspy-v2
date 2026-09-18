@@ -1,0 +1,155 @@
+{%- import "_macros.html" as ui -%}
+{%- set nav_key = active_nav or 'pages' -%}
+{%- set meta = ui.PAGE_META.get(nav_key, ('', '')) -%}
+{%- set page_title = title or meta[0] or 'Ad Spy' -%}
+{%- set page_sub = subtitle if subtitle is defined and subtitle is not none else meta[1] -%}
+{#- `dataset` comes from the context processor in app/__init__.py. A template
+    that is *imported* as a macro module (group_detail.html imports
+    group_list.html, which extends this file) renders without a request
+    context, so fall back to a harmless OLD DATA stub rather than raise. -#}
+{%- set ds = dataset if dataset is defined and dataset else {'name': 'old', 'label': 'OLD DATA', 'other': 'new', 'other_label': 'NEW DATA', 'path': '', 'sidecar': '', 'switchable': false, 'frozen': true, 'new_exists': false} -%}
+<!doctype html>
+<html lang="en" data-theme="black">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ page_title }} - Pixellab Ad Spy{% endblock %}</title>
+  {#- Fonts are self-hosted in static/fonts and declared in app.css. v1 pulled
+      Space Grotesk / Inter / JetBrains Mono from fonts.googleapis.com; v2 is a
+      local tool and must look identical with the network unplugged. -#}
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect width='24' height='24' rx='6' fill='%23f5a623'/><g fill='%230a0b0e'><rect x='5' y='5' width='6' height='6' rx='1'/><rect x='13' y='5' width='6' height='6' rx='1'/><rect x='5' y='13' width='6' height='6' rx='1'/><rect x='13' y='13' width='6' height='6' rx='1'/></g></svg>">
+  <script>
+    // Theme before first paint, or the dark shell flashes white on every load.
+    // Values are v1's: "black" and "light" (not "dark").
+    (function () {
+      try {
+        var t = localStorage.getItem('pixellab-theme');
+        if (t === 'black' || t === 'light') document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {}
+    })();
+  </script>
+  {% block head %}{% endblock %}
+</head>
+<body data-page="{{ nav_key }}" data-dataset="{{ ds.name }}">
+<div class="app">
+
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">{{ ui.icon('brand', 17) }}</div>
+      <div class="brand-text"><span class="name">Pixellab</span><span class="sub">Ad Spy</span></div>
+    </div>
+
+    {#- v1's sidebar, item for item, in v1's order (services/web.py:157-172).
+        An item whose route is not registered yet renders as an inert span
+        rather than a link into the 404 page — the nav stays honest about the
+        shape of the finished tool without pretending the screen is there. -#}
+    {%- for section_label, items in ui.NAV_SECTIONS %}
+      <div class="nav-label">{{ section_label }}</div>
+      {%- for key, label, href, icon_name, fallback in items %}
+        {%- set target = href if route_exists(href) else (fallback if fallback and route_exists(fallback) else none) %}
+        {%- if target %}
+          <a class="nav-item{{ ' active' if key == nav_key }}" href="{{ target }}">{{ ui.icon(icon_name) }}<span>{{ label }}</span></a>
+        {%- else %}
+          <span class="nav-item is-soon" title="Not built yet">{{ ui.icon(icon_name) }}<span>{{ label }}</span><span class="nav-soon">soon</span></span>
+        {%- endif %}
+      {%- endfor %}
+    {%- endfor %}
+
+    {#- v1's foot says "SQLite WAL - port 4021". The second line is v2's: with
+        both tools open at once, the sidebar is where you check which one you
+        are looking at. -#}
+    <div class="sidebar-foot">
+      <div class="sync-row"><span class="sync-dot"></span><span>SQLite WAL - port {{ config.get('PORT', 4022) }}</span></div>
+      <div class="sync-row build-row"><span>{{ app_name }} · {{ ds.label }}</span></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <div class="page-title">{% block heading %}{{ page_title }}{% endblock %}
+          {#- Which dataset this screen is showing. Amber = OLD DATA (browse and
+              annotate; scans refused), green = NEW DATA (fresh; scans land here).
+              Rendered on every screen, the 404 page included. -#}
+          <span class="tag {{ 'live' if ds.name == 'new' else 'amber' }} dataset-chip" title="{{ ds.path }}">{{ ds.label }}</span>
+        </div>
+        {%- if page_sub %}<div class="page-sub">{{ page_sub }}</div>{% endif %}
+      </div>
+
+      <div class="topbar-search">
+        {{ ui.icon('search', 15) }}
+        <input id="globalSearch" placeholder="Search current page" autocomplete="off" aria-label="Search current page">
+        <kbd>Ctrl K</kbd>
+      </div>
+
+      <div class="topbar-actions">
+        {% block actions %}{% endblock %}
+        {#- The dataset switch. POST only (a GET 405s), confirmed by app.js off
+            data-confirm, refused by app/ds.py while a job is running. -#}
+        {%- if ds.switchable %}
+        <form method="post" action="/settings/dataset" class="dataset-switch"
+              data-confirm="Switch to {{ ds.other_label }}?{% if ds.other == 'new' %} New scans will land in data/adspy2-new.sqlite3; OLD DATA stays untouched.{% else %} Scans are refused on OLD DATA until you switch back.{% endif %}">
+          <input type="hidden" name="dataset" value="{{ ds.other }}">
+          <button type="submit" class="theme-quick wide dataset-switch-btn" title="Switch to {{ ds.other_label }}">{{ ui.icon('refresh', 15) }}<span>{{ ds.other_label }}</span></button>
+        </form>
+        {%- else %}
+        <span class="tag dataset-chip" title="pinned by ADSPY2_DB_PATH">pinned</span>
+        {%- endif %}
+        <button class="theme-quick" id="themeQuick" type="button" title="Switch black / white theme" aria-label="Switch theme">{{ ui.icon('sun', 16) }}</button>
+        {#- v1 puts the signed-in person's initials here. v2 has no accounts
+            (docs/00-decisions.md #4), so the chip keeps its geometry and
+            becomes what it always linked to: Settings. -#}
+        <a class="theme-quick wide" href="{{ '/settings' if route_exists('/settings') else '/' }}" title="Settings">{{ ui.icon('settings', 16) }}</a>
+        {#- SERVER MODE only (app/auth.py): the dashboard is on the internet behind
+            a login, so there has to be a way out. POST, never a link — a GET
+            logout can be triggered by any page that embeds the URL. Local mode
+            has no accounts and renders nothing here. -#}
+        {%- if config.get('SERVER_MODE') %}
+        <form method="post" action="/logout" class="inline-form">
+          {{ ui.btn('Log out', kind='ghost', size='sm', title='Log out of this dashboard') }}
+        </form>
+        {%- endif %}
+      </div>
+    </header>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="flashes">
+          {% for category, message in messages %}
+            <div class="flash flash-{{ category }}">{{ message }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    <section class="content">
+      {% block content %}
+        {% if not_found %}
+          <div class="empty">
+            <h2>404</h2>
+            <p>That screen does not exist (yet).</p>
+          </div>
+        {% elif server_error %}
+          <div class="empty">
+            <h2>Something broke</h2>
+            <p>Check <code>logs/server.error.log</code>.</p>
+          </div>
+        {% else %}
+          <div class="empty">
+            <h2>Skeleton is up</h2>
+            <p>Database is migrated and the app is serving.</p>
+            <p><a href="/health">/health</a></p>
+          </div>
+        {% endif %}
+      {% endblock %}
+    </section>
+  </main>
+
+</div>
+
+<div class="toast-host" id="toastHost"></div>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

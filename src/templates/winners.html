@@ -1,0 +1,274 @@
+{#- Winners — v1's ranking screen, same furniture in the same places.
+
+    Top to bottom, this is v1 (tabs/winners/ui.py:421-448): the mode segment,
+    the six formula tabs in v1's order, four KPIs, the filter bar (shown-count,
+    brand group, identity, status, limit) and the nine columns — #, Product,
+    Brand group, Winner score, Active, Represented, Oldest, New 30d, open.
+
+    What is different, and deliberately: the four evidence columns are sortable
+    (v1 had one fixed order per formula), and "Winner score" holds the verdict
+    you record rather than a number this app invented. v1's scoring formulas
+    are deferred by the PRD, so each formula tab is an ORDER BY over the
+    evidence column named in its tooltip — a claim you can check against the
+    column next to it.
+
+    Renders twice: as the page, and as the drawer fragment
+    (/ui/winners/<group>/<product>) that static/app.js drops into #drawer-body. -#}
+{% import "_macros.html" as ui %}
+
+{%- set VERDICT_TONE = {'proven': 'wt-proven', 'rising': 'wt-rising',
+                        'watch': 'wt-test', 'weak': 'wt-weak'} -%}
+
+{%- macro verdict(row) -%}
+  {%- if row.winner_status -%}
+    <span class="wscore-lbl">{{ row.score_display or (row.winner_status | capitalize) }}</span>
+    <span class="wscore-tag {{ VERDICT_TONE.get(row.winner_status, 'wt-weak') }}">{{ row.winner_status }}</span>
+  {%- else -%}
+    <span class="wscore-lbl faint">&mdash;</span>
+    <span class="wscore-tag wt-weak">unjudged</span>
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro cpp(value) -%}{{ '₹' ~ ('%.0f' | format(value)) if value else '—' }}{%- endmacro -%}
+
+
+{% if fragment == 'detail' %}
+{#- ------------------------------------------------------------------ drawer -#}
+{{ ui.drawer_head(
+     item.product_name or 'Unnamed product',
+     meta=(item.store_domain or '') ~ (' - ' if item.store_domain) ~ (item.group.name if item.group else ''),
+     kicker='Winner candidate',
+     name_for_avatar=item.product_name,
+     stats=[{'value': item.active_ads, 'label': 'Active'},
+            {'value': item.represented_ads, 'label': 'Represented'},
+            {'value': item.logical_advertisers, 'label': 'Advertisers'},
+            {'value': item.oldest_age_days ~ 'd', 'label': 'Oldest'}]) }}
+
+{% call ui.drawer_block('Evidence') %}
+  <dl class="facts">
+    <dt>Active ads</dt><dd>{{ item.active_ads }}</dd>
+    <dt>Represented</dt><dd>{{ item.represented_ads }}</dd>
+    <dt>Advertisers</dt><dd>{{ item.logical_advertisers }} logical advertisers</dd>
+    <dt>Oldest active</dt><dd>{{ ui.days_pill(item.oldest_age_days) }}</dd>
+    <dt>New, 30d</dt><dd>{{ item.new_30d }}</dd>
+    <dt>Ads seen</dt><dd>{{ item.total_ads }}</dd>
+    <dt>Newest ad</dt><dd class="mono faint">{{ item.newest_start_date or '—' }}</dd>
+    <dt>Identity</dt><dd>{{ ui.chip(item.identity_status or 'unknown') }}</dd>
+  </dl>
+{% endcall %}
+
+{% call ui.drawer_block('Advertising pages') %}
+  <div class="lp-facts">
+    {% for page in item.top_pages %}
+      <div class="lp-fact">
+        <span class="lf-k"><a href="/pages/{{ page.page_id }}">{{ page.page_name }}</a></span>
+        <span class="lf-v">{{ page.ads }} active</span>
+      </div>
+    {% else %}
+      {{ ui.empty_inline('No active ads on this group’s pages.') }}
+    {% endfor %}
+  </div>
+{% endcall %}
+
+{% call ui.drawer_block('Decision') %}
+  <form method="post" action="{{ url_for('winners.save_shortlist', group_id=item.group.id, product_id=item.product_id) }}">
+    <input type="hidden" name="next" value="{{ back }}">
+    <input type="hidden" name="mode" value="{{ mode }}">
+    <input type="hidden" name="formula" value="{{ formula }}">
+    <div class="field">
+      <label for="winner-status">Winner status</label>
+      <select id="winner-status" name="winner_status">
+        {% for key, label in statuses %}
+          <option value="{{ key }}" {{ 'selected' if key == (item.winner_status or 'watch') }}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="assigned-to">Assign buyer</label>
+      <input id="assigned-to" type="text" name="assigned_to" value="{{ item.assigned_to or '' }}"
+             placeholder="Unassigned" autocomplete="off">
+      <span class="field-hint">Free text — v2 has no accounts.</span>
+    </div>
+    <div class="field">
+      <label for="target-cpp">Target CPP (₹)</label>
+      <input id="target-cpp" type="text" inputmode="decimal" name="target_cpp"
+             value="{{ '%.0f' | format(item.target_cpp) if item.target_cpp else '' }}"
+             placeholder="185" autocomplete="off">
+    </div>
+    <div class="btn-row">
+      {{ ui.btn('Save verdict', kind='ghost', name='action', value='save') }}
+      {{ ui.btn('Push to Test Queue', kind='primary', name='action', value='push') }}
+    </div>
+  </form>
+{% endcall %}
+
+{% call ui.drawer_block('Open records') %}
+  <div class="btn-row">
+    {% if item.product_url %}
+      {{ ui.btn('External product ↗', href=item.product_url, kind='ghost', size='sm',
+                attrs={'target': '_blank', 'rel': 'noopener'}) }}
+    {% else %}
+      {{ ui.btn('External product ↗', kind='ghost', size='sm', disabled=true, type='button') }}
+    {% endif %}
+    {% if route_exists('/products') %}
+      {{ ui.btn('Internal product ↘', href='/products?product_id=' ~ item.product_id, kind='ghost', size='sm') }}
+    {% endif %}
+    {% if item.queue_item_id %}
+      {{ ui.btn('On the board (' ~ item.queue_status ~ ')', href='/test-queue', kind='ghost', size='sm') }}
+    {% endif %}
+  </div>
+{% endcall %}
+
+{% else %}
+{#- -------------------------------------------------------------------- page -#}
+{% extends "base.html" %}
+
+{% block content %}
+
+{#- 1. v1's control row: the scoring mode on the left, the six ranking formulas
+    opposite it on the right (tabs/winners/ui.py:421-448). These were two stacked
+    rows here, which put the formula group a row below where v1 has it; the
+    .result-count carries margin-left:auto, so placing it between the two pushes
+    itself and the formula group to the right edge exactly as v1 does. -#}
+<div class="section-toolbar">
+  {{ ui.pill_tabs(mode_tabs, mode, aria='Scoring mode') }}
+  <span class="result-count">ranked by {{ sort }} {{ direction }}</span>
+  {{ ui.filter_group(formula_tabs, formula, aria='Ranking formula') }}
+</div>
+
+{% if mode == 'extract' %}
+  {#- v1's third mode: the Winner Landing capture queue. -#}
+  {{ ui.panel_open('Extract details',
+       desc='Landing-page capture runs for this brand group. A run walks the ranked products and records what each one sells for.',
+       scroll=true) }}
+    <table class="tbl">
+      {{ ui.thead([('Run', 'num'), ('Scope',), ('Status',), ('Products', 'num'),
+                   ('Done', 'num'), ('Success', 'num'), ('Failed', 'num'),
+                   ('Created',), ('Finished',)]) }}
+      <tbody>
+        {% for run in runs %}
+          <tr>
+            <td class="num">#{{ run.id }}</td>
+            <td>{{ run.run_scope }}</td>
+            <td>{{ ui.status_pill(run.status) }}</td>
+            <td class="num">{{ run.total_products }}</td>
+            <td class="num">{{ run.completed_products }}</td>
+            <td class="num delta-up">{{ run.success_products }}</td>
+            <td class="num delta-down">{{ run.failed_products }}</td>
+            <td class="mono faint">{{ run.created_at }}</td>
+            <td class="mono faint">{{ run.finished_at or '—' }}</td>
+          </tr>
+        {% else %}
+          {{ ui.empty_state('No capture runs yet',
+               'Landing capture is queued from a ranked product once the extraction worker is running.',
+               colspan=9) }}
+        {% endfor %}
+      </tbody>
+    </table>
+  {{ ui.panel_close() }}
+
+{% else %}
+
+{#- 2. v1's four KPIs, in v1's order. These count human verdicts, not a model. -#}
+{% call ui.kpi_grid() %}
+  {{ ui.kpi('Proven',    summary.proven, mark='P', value_color='var(--green)') }}
+  {{ ui.kpi('Rising',    summary.rising, mark='R', value_color='var(--amber-bright)') }}
+  {{ ui.kpi('Watch',     summary.watch,  mark='W') }}
+  {{ ui.kpi('Evaluated', evaluated,      mark='E', delta_label='candidates with an active ad') }}
+{% endcall %}
+
+<div style="height:16px"></div>
+
+{#- 3. v1's filter bar. One GET form, so it works with JS off. -#}
+{% set head_actions %}
+  <form class="inline-form" method="get" action="{{ url_for('winners.winners_page') }}">
+    <input type="hidden" name="mode" value="{{ mode }}">
+    <input type="hidden" name="formula" value="{{ formula }}">
+    <span class="result-count">Showing {{ items | length }} of {{ total }} ranked</span>
+    <select class="settings-select" name="group_id" aria-label="Brand group">
+      {% for group in groups %}
+        <option value="{{ group.id }}" {{ 'selected' if group.id == group_id }}>{{ group.name }} - {{ '{:,}'.format(group.product_count) }} products</option>
+      {% endfor %}
+    </select>
+    <select class="settings-select" name="identity" aria-label="Filter by brand identity confidence"
+            title="Filter candidates by how confidently their advertiser identity is resolved">
+      {% for key, label in identities %}
+        <option value="{{ key }}" {{ 'selected' if key == identity }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <select class="settings-select" name="status" aria-label="Winner status">
+      {% for key, label in status_filters %}
+        <option value="{{ key }}" {{ 'selected' if key == status }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <select class="settings-select" name="limit" aria-label="How many">
+      {% for value, label in limits %}
+        <option value="{{ value }}" {{ 'selected' if value == limit }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <input class="input-sm" type="search" name="q" value="{{ q }}" placeholder="Product or domain" aria-label="Search products">
+    {{ ui.btn('Apply', kind='ghost', size='sm') }}
+  </form>
+{% endset %}
+
+{{ ui.panel_open('Ranked products',
+     desc='Every product this brand group is advertising right now, ordered by the evidence column the formula names.',
+     actions=head_actions, scroll=true) }}
+  <table class="tbl">
+    <thead>
+      <tr>
+        <th class="num">#</th>
+        {%- for key, label, cls in [('product', 'Product', ''), ('advertisers', 'Brand group', ''),
+                                    ('score', 'Winner score', ''), ('active', 'Active', 'num'),
+                                    ('represented', 'Represented', 'num'), ('oldest', 'Oldest', 'num'),
+                                    ('new30', 'New 30d', 'num')] %}
+          {%- set link = sort_links[key] %}
+          <th{{ ' class="' ~ cls ~ '"' | safe if cls }}>{{ ui.sort_th(label, link.href, link.on, link.dir) }}</th>
+        {%- endfor %}
+        <th class="tight"></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in items %}
+        <tr data-searchable data-search-text="{{ row.product_name }} {{ row.store_domain }} {{ row.winner_status or '' }}">
+          <td class="num rank {{ 'top' if row.rank <= 3 }}">{{ '%02d' | format(row.rank) }}</td>
+          <td>{{ ui.page_cell(row.product_name or 'Unnamed product',
+                              meta=row.store_domain or '—',
+                              badges=ui.chip('on board: ' ~ row.queue_status, 'prod') if row.queue_status) }}</td>
+          <td>{{ ui.page_cell(group.name if group else '—',
+                              meta=row.logical_advertisers ~ ' logical advertisers') }}</td>
+          <td><div class="wscore">{{ verdict(row) }}</div></td>
+          <td class="num">{{ '{:,}'.format(row.active_ads) }}</td>
+          <td class="num">{{ '{:,}'.format(row.represented_ads) }}</td>
+          <td class="num">{{ ui.days_pill(row.oldest_age_days) }}</td>
+          <td class="num">{{ '{:,}'.format(row.new_30d) }}</td>
+          <td class="tight">
+            {{ ui.btn('→', kind='ghost', size='sm', type='button', title='Open decision drawer',
+                      attrs={'data-drawer': url_for('winners.winner_detail_fragment',
+                                                    group_id=group_id, product_id=row.product_id,
+                                                    mode=mode, formula=formula,
+                                                    back=request.full_path)}) }}
+          </td>
+        </tr>
+      {% else %}
+        {% if groups %}
+          {{ ui.empty_state('No ranked products', 'Change the formula or filters.', colspan=9) }}
+        {% else %}
+          {{ ui.empty_state('No brand groups yet',
+               'Winners ranks inside a brand group. Create one on the Brand Groups screen.', colspan=9) }}
+        {% endif %}
+      {% endfor %}
+    </tbody>
+  </table>
+{{ ui.panel_close() }}
+
+<div style="height:14px"></div>
+{{ ui.queue_hint('Scoring formulas are deferred (PRD): every column above is a
+   count over ads, and each formula tab orders by the evidence column named in
+   its tooltip. "Winner score" is the verdict you record in the drawer.') }}
+
+{% endif %}
+
+{{ ui.drawer_mount('Winner candidate') }}
+{% endblock %}
+{% endif %}

@@ -1,0 +1,247 @@
+{% import "_macros.html" as ui %}
+{% extends "base.html" %}
+
+{#- Logs — owner request #6.
+
+    "if any bug or anything comes up, one click and it is saved to the logs,
+     and whenever we restart, the logs tell me which bugs happened and what
+     still needs solving."
+
+    So the screen is a to-do list, not a tail. Open issues come first, worst
+    first, each with WHEN, WHAT, WHERE, HOW MANY TIMES it recurred and a
+    Resolve button; the raw log tails sit underneath for when the summary is
+    not enough. The amber button writes the whole thing to one file that
+    outlives the process.
+
+    Every component here is from _macros.html and every class is already in
+    static/app.css — no per-screen CSS (tests/test_design_system.py enforces
+    both). The two inline `style` attributes are the same flex-wrap trick
+    alerts.html uses to get a two-up layout without inventing a breakpoint. -#}
+
+{% block title %}Logs - Pixellab Ad Spy{% endblock %}
+{% block heading %}Logs{% endblock %}
+
+{% block content %}
+
+{#- Row 1: open / resolved / all, the counts, then the two actions. "Save
+    current logs" is the amber one because it is the thing he asked for. -#}
+<section class="section-toolbar">
+  {{ ui.filter_group(state_filters, current_state, aria='Issue state') }}
+  <span class="result-count">{{ issues | length }} shown / {{ counts.open }} open</span>
+  <a class="btn ghost" href="{{ url_for('logs.download_current') }}">Download without saving</a>
+  <form method="post" action="{{ url_for('logs.sweep_now') }}">
+    <input type="hidden" name="next" value="{{ request.full_path }}">
+    <button class="btn" type="submit">Re-check now</button>
+  </form>
+  <form method="post" action="{{ url_for('logs.capture') }}">
+    <input type="hidden" name="next" value="{{ request.full_path }}">
+    <button class="btn primary" type="submit">Save current logs</button>
+  </form>
+</section>
+
+{%- if kind_filters | length > 1 %}
+<section class="section-toolbar">
+  {{ ui.filter_group(kind_filters, current_kind, aria='Issue kind') }}
+</section>
+{%- endif %}
+
+{{ ui.metric_row([
+     {'value': counts.open,        'label': 'Open issues',   'tone': ('stale' if counts.open else '')},
+     {'value': counts.errors,      'label': 'Error level',   'tone': ('stale' if counts.errors else '')},
+     {'value': counts.occurrences, 'label': 'Times seen',    'title': 'Total sightings across every open issue'},
+     {'value': worker.last_seen,   'label': 'Extension seen', 'title': worker.worker_id or 'no extension has reported in yet'},
+     {'value': snapshots | length, 'label': 'Saved log files'}
+   ]) }}
+
+{{ ui.queue_hint('Issues are found automatically — unhandled server errors, failed and incomplete scrapes, rejected batches, pages stuck in error, and anything the extension reports. They survive a restart. Resolve one and it stops nagging; if it happens again it reopens itself.') }}
+
+{#- ------------------------------------------------------------------ ISSUES -#}
+{%- set issue_actions %}
+  <form method="post" action="{{ url_for('logs.resolve_everything') }}">
+    <input type="hidden" name="next" value="{{ request.full_path }}">
+    <input type="hidden" name="kind" value="{{ current_kind }}">
+    <button class="btn sm ghost" type="submit">Resolve all shown</button>
+  </form>
+{%- endset %}
+
+{{ ui.panel_open('Issues',
+      desc=counts.open ~ ' open - ' ~ counts.resolved ~ ' resolved - kept to the newest ' ~ issue_limit,
+      actions=issue_actions) }}
+  <div class="table-wrap">
+    <table class="tbl">
+      {{ ui.thead([('Sev', 'tight'), ('What',), ('Where',), ('Times', 'num', 'How often this exact problem recurred'),
+                   ('First seen',), ('Last seen',), ('', 'tight')]) }}
+      <tbody>
+        {% for issue in issues %}
+          <tr data-searchable data-search-text="{{ issue.title }} {{ issue.location }} {{ issue.kind_label }}">
+            <td class="tight">
+              {{ ui.badge(issue.severity,
+                          'failed' if issue.severity == 'error' else ('pending' if issue.severity == 'warn' else 'running')) }}
+            </td>
+            <td class="wrap">
+              <strong>{{ issue.title }}</strong>
+              {{ ui.tag(issue.kind_label) }}
+              {%- if not issue.is_open %}{{ ui.micro_badge('resolved') }}{% endif %}
+              {%- if issue.reopened_count %}{{ ui.micro_badge('reopened ' ~ issue.reopened_count ~ 'x') }}{% endif %}
+              {%- if issue.detail %}
+                <div class="muted small mono" title="{{ issue.detail }}">{{ issue.detail | truncate(180, true, '…') }}</div>
+              {%- endif %}
+              {%- if not issue.is_open and issue.resolved_note %}
+                <div class="muted small">Resolved: {{ issue.resolved_note }}</div>
+              {%- endif %}
+            </td>
+            <td class="wrap muted">
+              {{ issue.location or '—' }}
+              {%- if issue.page_id and route_exists('/pages') %}
+                <a class="linklike" href="{{ url_for('pages.detail', page_id=issue.page_id) }}">open page</a>
+              {%- endif %}
+              {%- if issue.job_id and route_exists('/queue') %}
+                <a class="linklike" href="/queue/{{ issue.job_id }}">open job</a>
+              {%- endif %}
+            </td>
+            <td class="num">{{ issue.occurrences }}</td>
+            <td class="muted nowrap" title="{{ issue.first_seen_at }}">{{ issue.first_seen }}</td>
+            <td class="muted nowrap" title="{{ issue.last_seen_at }}">{{ issue.last_seen }}</td>
+            <td class="tight">
+              {% if issue.is_open %}
+                <form method="post" action="{{ url_for('logs.resolve', issue_id=issue.id) }}">
+                  <input type="hidden" name="next" value="{{ request.full_path }}">
+                  <button class="btn sm good" type="submit">Resolve</button>
+                </form>
+              {% else %}
+                <form method="post" action="{{ url_for('logs.reopen', issue_id=issue.id) }}">
+                  <input type="hidden" name="next" value="{{ request.full_path }}">
+                  <button class="btn sm ghost" type="submit">Reopen</button>
+                </form>
+              {% endif %}
+            </td>
+          </tr>
+        {% else %}
+          {{ ui.empty_state(
+               'Nothing logged here yet.',
+               'That is the good outcome. Failed scrapes, rejected batches and server errors land here on their own; "Re-check now" looks again immediately.',
+               colspan=7) }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{{ ui.panel_close() }}
+
+{#- --------------------------------------------------------------- SNAPSHOTS -#}
+<div class="btn-row" style="align-items:stretch;gap:12px;margin-top:14px">
+
+  {{ ui.panel_open('Saved log files',
+        desc='One click writes the open issues, the extension log and the server log tail into a single .txt under logs/snapshots. Newest ' ~ snapshot_limit ~ ' are kept.',
+        attrs={'style': 'flex:1 1 520px;min-width:0'}) }}
+    <div class="table-wrap">
+      <table class="tbl">
+        {{ ui.thead([('File',), ('Open at capture', 'num'), ('Size', 'num'), ('Saved',), ('', 'tight')]) }}
+        <tbody>
+          {% for snap in snapshots %}
+            <tr data-searchable data-search-text="{{ snap.filename }} {{ snap.note }}">
+              <td class="wrap">
+                <span class="mono">{{ snap.filename }}</span>
+                {%- if snap.note %}<div class="muted small">{{ snap.note }}</div>{% endif %}
+                {%- if not snap.exists %}{{ ui.micro_badge('file missing') }}{% endif %}
+              </td>
+              <td class="num">{{ snap.open_issues }}</td>
+              <td class="num">{{ snap.size_kb }} KB</td>
+              <td class="muted nowrap" title="{{ snap.created_at }}">{{ snap.when }}</td>
+              <td class="tight">
+                <div class="btn-row">
+                  <a class="btn sm ghost" href="{{ url_for('logs.download_snapshot', snapshot_id=snap.id) }}">Download</a>
+                  <form method="post" action="{{ url_for('logs.delete_snapshot', snapshot_id=snap.id) }}">
+                    <input type="hidden" name="next" value="{{ request.full_path }}">
+                    <button class="btn sm danger" type="submit">Delete</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+          {% else %}
+            {{ ui.empty_state('No saved log files yet.',
+                              'Press "Save current logs" when something goes wrong — the file is still there after a restart.',
+                              colspan=5) }}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {{ ui.panel_close() }}
+
+  {{ ui.panel_open('Note something by hand', pad=true,
+        attrs={'style': 'flex:0 1 330px;min-width:300px;align-self:flex-start'}) }}
+    <form method="post" action="{{ url_for('logs.add_note') }}">
+      <input type="hidden" name="next" value="{{ request.full_path }}">
+      <div class="field">
+        <label for="log-note-title">What went wrong</label>
+        <input class="input-lg input-sm" id="log-note-title" type="text" name="title"
+               placeholder="Products screen showed 0 after the 3pm scan" required>
+      </div>
+      <div class="field">
+        <label for="log-note-detail">Anything else</label>
+        <input class="input-lg input-sm" id="log-note-detail" type="text" name="detail"
+               placeholder="optional">
+      </div>
+      <p class="muted small">
+        Goes into the same list and the same saved file as the automatic ones, so a
+        thing you noticed and a thing the server caught are never in two places.
+      </p>
+      <div class="btn-row">
+        <button class="btn primary" type="submit">Add to the log</button>
+      </div>
+    </form>
+  {{ ui.panel_close() }}
+
+</div>
+
+{#- ------------------------------------------------------------- RAW TAILS -#}
+<div class="btn-row" style="align-items:stretch;gap:12px;margin-top:14px">
+
+  {{ ui.panel_open('Extension log',
+        desc=(worker.worker_id or 'no extension has reported in yet') ~ ' - last seen ' ~ worker.last_seen,
+        scroll=true, attrs={'style': 'flex:1 1 420px;min-width:0'}) }}
+    <table class="tbl">
+      <tbody>
+        {% for line in worker_lines %}
+          <tr data-searchable data-search-text="{{ line.message }}">
+            <td class="tight muted nowrap mono">{{ line.logged_at }}</td>
+            <td class="tight">{{ ui.badge(line.level, 'failed' if line.level in ('error', 'fatal') else ('pending' if line.level == 'warn' else 'running')) }}</td>
+            <td class="wrap mono">{{ line.message }}</td>
+          </tr>
+        {% else %}
+          {{ ui.empty_state('The extension has not shipped its log here yet.',
+                            'It posts its 200-line buffer to /api/logs/worker. Until then, open the extension side panel to read it there.',
+                            colspan=3) }}
+        {% endfor %}
+      </tbody>
+    </table>
+  {{ ui.panel_close() }}
+
+  {{ ui.panel_open('Server error log',
+        desc='tail of logs/server.error.log, newest first',
+        scroll=true, attrs={'style': 'flex:1 1 420px;min-width:0'}) }}
+    <table class="tbl">
+      <tbody>
+        {% for line in error_log %}
+          <tr data-searchable data-search-text="{{ line }}">
+            <td class="wrap mono">{{ line }}</td>
+          </tr>
+        {% else %}
+          {{ ui.empty_state('Nothing in the server error log.',
+                            'gunicorn writes it only when the process itself complains; handled errors are in the Issues table above.',
+                            colspan=1) }}
+        {% endfor %}
+      </tbody>
+    </table>
+  {{ ui.panel_close() }}
+
+</div>
+
+<p class="muted small" style="margin-top:12px">
+  On disk:
+  {%- for file in log_files %}
+    <span class="mono">logs/{{ file.name }}</span> ({{ (file.size_bytes / 1024) | round(1) }} KB){{ ',' if not loop.last }}
+  {%- endfor %}
+  — written by gunicorn, never rotated. The Issues table above is the part that survives a restart with meaning attached.
+</p>
+
+{% endblock %}

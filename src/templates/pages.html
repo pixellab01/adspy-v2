@@ -1,0 +1,189 @@
+{% from "_drawer.html" import drawer_mount %}
+{% import "_macros.html" as ui %}
+{% extends "base.html" %}
+
+{#- v1 calls this screen "Page Analyzer" and it lives at /page-analyzer; v2
+    serves it at / and /pages. Same screen, same place in the nav.
+
+    One question first: what changed since the last scan? That is the Δ column,
+    and it is the whole of v2's "daily news" (docs/00-decisions.md #6) — no
+    Telegram, no email, just the delta and what is behind it. -#}
+
+{% macro sort_link(key, label) %}
+  {%- set is_current = (sort == key) -%}
+  {%- set next_dir = 'asc' if (is_current and direction == 'desc') else 'desc' -%}
+  {{ ui.sort_th(label,
+       url_for('pages.index', q=search or none, sort=key, dir=next_dir,
+               hidden='1' if include_hidden else none,
+               changed='1' if changed_only else none),
+       is_current, direction) }}
+{% endmacro %}
+
+{% block title %}Page Analyzer - Pixellab Ad Spy{% endblock %}
+{% block heading %}Page Analyzer{% endblock %}
+
+{% block content %}
+
+{#- v1's Page Analyzer opens with the manual "add to queue" form; so does this. -#}
+{{ ui.panel_open('Add a page', desc=add_page_help, pad=true) }}
+  <form class="toolbar-row" method="post" action="{{ url_for('pages.add_page') }}">
+    <input type="hidden" name="next" value="{{ request.full_path }}">
+    <div class="field" style="flex:1 1 340px;margin:0">
+      <label for="add-page-url">Page URL or Meta Page ID</label>
+      <div class="input-icon-wrap">
+        {{ ui.icon('pages', 16) }}
+        <input class="input-lg" id="add-page-url" type="text" name="page_url"
+               placeholder="facebook.com/ads/library/?view_all_page_id=... or a Meta Page ID"
+               autocomplete="off" required>
+      </div>
+    </div>
+    <div class="field" style="flex:0 1 200px;margin:0">
+      <label for="add-page-name">Name <span class="field-hint">(optional)</span></label>
+      <input class="input-lg" id="add-page-name" type="text" name="name" placeholder="Nova Bloom">
+    </div>
+    <button class="btn primary" type="submit" style="padding:13px 22px;align-self:flex-end">Add to queue</button>
+  </form>
+{{ ui.panel_close() }}
+
+<section class="stat-row"
+         data-poll-probe="{{ url_for('queue.queue_rows_fragment', status='open') }}"
+         data-poll-page=".stat-row, #bulk .result-count, #bulk tbody">
+  <div class="stat"><span class="stat-num">{{ overview.pages }}</span><span class="stat-label">Pages tracked</span></div>
+  <div class="stat"><span class="stat-num">{{ overview.active_ads }}</span><span class="stat-label">Active ads</span></div>
+  <div class="stat"><span class="stat-num delta-up" style="font-size:22px">{{ overview.pages_up }}</span><span class="stat-label">Pages up</span></div>
+  <div class="stat"><span class="stat-num delta-down" style="font-size:22px">{{ overview.pages_down }}</span><span class="stat-label">Pages down</span></div>
+  <div class="stat"><span class="stat-num stale-bad">{{ overview.stale_pages }}</span><span class="stat-label">Stale (&gt;{{ stale_bad_days }}d or never)</span></div>
+</section>
+
+<section class="screen-toolbar">
+  <form class="inline-form" method="get" action="{{ url_for('pages.index') }}">
+    <input type="search" name="q" value="{{ search }}" placeholder="search name or page id" size="22">
+    <input type="hidden" name="sort" value="{{ sort }}">
+    <input type="hidden" name="dir" value="{{ direction }}">
+    <label class="check"><input type="checkbox" name="changed" value="1" {{ 'checked' if changed_only }}> changed only</label>
+    <label class="check"><input type="checkbox" name="hidden" value="1" {{ 'checked' if include_hidden }}> show hidden</label>
+    <button class="btn" type="submit">Filter</button>
+    {% if search or changed_only or include_hidden %}
+      <a class="btn ghost" href="{{ url_for('pages.index') }}">Clear</a>
+    {% endif %}
+  </form>
+
+  <details class="token-box">
+    <summary>Extension connection</summary>
+    <div class="token-inner">
+      <p class="muted small">Paste these two into the extension's settings. Nothing else to configure.</p>
+      <label>Dashboard URL</label>
+      <div class="copy-row">
+        <input type="text" class="mono" value="{{ dashboard_url }}" readonly id="dashboard-url">
+        <button class="btn sm" type="button" data-copy="#dashboard-url">Copy</button>
+      </div>
+      <label>Worker token</label>
+      {% if worker_token %}
+        <div class="copy-row">
+          <input type="text" class="mono" value="{{ worker_token }}" readonly id="worker-token">
+          <button class="btn sm" type="button" data-copy="#worker-token">Copy</button>
+        </div>
+      {% else %}
+        <form method="post" action="{{ url_for('pages.issue_worker_token') }}">
+          <input type="hidden" name="next" value="{{ request.full_path }}">
+          <button class="btn primary sm" type="submit">Generate worker token</button>
+        </form>
+      {% endif %}
+    </div>
+  </details>
+</section>
+
+<form id="bulk" method="post" action="{{ url_for('pages.retrack_selected') }}">
+  <input type="hidden" name="next" value="{{ request.full_path }}">
+
+  <div class="bulk-bar">
+    <button class="btn primary" type="submit" id="retrack-selected" disabled>
+      Re-track selected (<span id="selected-count">0</span>)
+    </button>
+    <span class="result-count" style="margin-left:0">{{ pages|length }} pages shown</span>
+  </div>
+
+  {% set head_actions %}{{ ui.tag(pages|length ~ ' rows') }}{% endset %}
+  {{ ui.panel_open('Stored pages', desc='Only records with a real Meta Page ID can be queued.', actions=head_actions, scroll=true) }}
+    <table class="tbl">
+      <thead>
+        <tr>
+          <th class="tight"><input type="checkbox" id="select-all" title="select all"></th>
+          <th>{{ sort_link('name', 'Page') }}</th>
+          <th class="num">{{ sort_link('active', 'Active') }}</th>
+          <th class="num" title="Meta's header estimate at the last scan">{{ sort_link('estimate', 'FB est.') }}</th>
+          <th class="num" title="active ads now vs. after the previous scan">{{ sort_link('delta', 'Δ since last scan') }}</th>
+          <th class="num">{{ sort_link('new', 'New') }}</th>
+          <th class="num">{{ sort_link('stopped', 'Stopped') }}</th>
+          <th>{{ sort_link('scanned', 'Last scanned') }}</th>
+          <th class="right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for page in pages %}
+          <tr class="{{ 'is-hidden-page' if page.is_hidden }}" data-searchable
+              data-search-text="{{ page.display_name }} {{ page.platform_page_id }}">
+            <td class="tight">
+              <input type="checkbox" class="row-check" name="page_ids" value="{{ page.id }}">
+            </td>
+            <td>
+              {%- set row_badges %}
+                {% if page.is_hidden %}{{ ui.tag('hidden') }}{% endif %}
+                {% if page.is_queued %}{{ ui.badge(page.current_scan_status if page.current_scan_status != 'idle' else 'queued') }}{% endif %}
+              {% endset -%}
+              {{ ui.page_cell(page.display_name,
+                              meta='ID ' ~ page.platform_page_id,
+                              href=url_for('pages.detail', page_id=page.id),
+                              badges=row_badges) }}
+            </td>
+            <td class="num"><span class="adcount">{{ page.active_ads }}</span></td>
+            <td class="num muted">{{ page.fb_estimated_results if page.fb_estimated_results is not none else '—' }}</td>
+            <td class="num">
+              {% if page.delta is none %}
+                <span class="faint" title="never completed a scan">—</span>
+              {% else %}
+                <button type="button" class="delta-btn delta-{{ page.delta_direction }}"
+                        data-drawer="{{ url_for('pages.drawer_changes', page_id=page.id) }}"
+                        title="what changed">
+                  {{ '+' if page.delta > 0 }}{{ page.delta }}
+                </button>
+              {% endif %}
+            </td>
+            <td class="num {{ 'delta-up' if page.last_new_ads }}">{{ page.last_new_ads or 0 }}</td>
+            <td class="num {{ 'delta-down' if page.last_stopped_ads }}">{{ page.last_stopped_ads or 0 }}</td>
+            <td>
+              {% if page.days_since_scan is none %}
+                <span class="stale-bad">never</span>
+              {% else %}
+                <span class="stale-{{ 'ok' if page.staleness == 'fresh' else ('warn' if page.staleness == 'warn' else 'bad') }}"
+                      title="{{ page.last_verified_at }}">
+                  {{ page.days_since_scan }}d ago
+                </span>
+              {% endif %}
+            </td>
+            <td class="right nowrap">
+              <div class="btn-row" style="justify-content:flex-end">
+                <button class="btn sm ghost" type="submit" form="bulk"
+                        formaction="{{ url_for('pages.retrack_one', page_id=page.id) }}">Re-track</button>
+                <button class="btn sm {{ 'warn' if not page.is_hidden else 'ghost' }}" type="submit" form="bulk"
+                        formaction="{{ url_for('pages.hide_page', page_id=page.id) }}">{{ 'Un-hide' if page.is_hidden else 'Hide' }}</button>
+                {% if page.library_url %}
+                  <a class="btn sm ghost" href="{{ page.library_url }}" target="_blank" rel="noopener" title="Open on Meta">Meta ↗</a>
+                {% endif %}
+              </div>
+            </td>
+          </tr>
+        {% else %}
+          {% if search or changed_only %}
+            {{ ui.empty_two('Nothing matches that filter.', 'Clear the search or the "changed only" box.', colspan=9) }}
+          {% else %}
+            {{ ui.empty_two('No pages yet.', 'Paste an Ad Library URL up there to add the first one.', colspan=9) }}
+          {% endif %}
+        {% endfor %}
+      </tbody>
+    </table>
+  {{ ui.panel_close() }}
+</form>
+
+{{ drawer_mount() }}
+{% endblock %}

@@ -1,0 +1,17 @@
+# AdSpy v2 — stdlib + Flask + raw sqlite3. No ORM, no framework circus.
+Flask==3.1.0
+gunicorn==23.0.0
+
+# tests
+pytest==8.3.4
+
+# OPTIONAL — transcription (app/transcription.py, app/media_refresh.py).
+# Neither is imported at boot; each is probed lazily and the UI says what is
+# missing. Install into the same .venv:
+#   playwright==1.47.0      then: .venv/bin/playwright install chromium
+#                           re-signs expired fbcdn video links from the PUBLIC
+#                           Ad Library page (no login). Without it the panel
+#                           offers "Re-scan pages" instead of "Refresh links".
+#   imageio-ffmpeg==0.5.1   a bundled ffmpeg when /opt/homebrew/bin/ffmpeg is
+#                           absent: 16 kHz mono FLAC extraction, silence
+#                           pre-check, duration, poster frames.

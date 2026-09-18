@@ -1,0 +1,205 @@
+{# ---------------------------------------------------------------------------
+   Transcription views — the per-video table and its companions.
+
+   "Click a product -> transcribe its videos -> script per video -> language per
+   video -> identical scripts clustered." This file is the last three of those,
+   as Jinja macros, so the product drawer, the product detail page, the polled
+   transcription fragment and the ad drawer all render the SAME rows.
+
+   Data comes from app/transcription.py PART 9 (product_videos,
+   video_language_summary, ad_transcript). Templates present; they never count.
+
+   Styling is static/app.css only — no <style> block here (tests enforce it).
+   The two small inline `style` attributes size the poster thumbnail, the way
+   products.html sizes its own spacing.
+
+   Macros:
+     language_summary(summary)                   "12 videos: 8 Hindi, 3 Marathi"
+     videos_table(product, videos, video_lang, video_languages, back, base_args)
+     ad_transcript_section(intel, ad)            the ad drawer's Transcript block
+--------------------------------------------------------------------------- #}
+{%- import "_macros.html" as ui -%}
+
+
+{%- macro language_summary(summary) -%}
+  {% if summary and summary.total %}
+    <div class="true-size">
+      {{ ui.icon('info', 18) }}
+      <span>
+        <b>{{ summary.total }}</b> video{{ '' if summary.total == 1 else 's' }} transcribed:
+        {% for part in summary.parts %}<b>{{ part.count }}</b> {{ part.name }}{{ ', ' if not loop.last }}{% endfor %}
+        {%- if summary.guarded %}{{ ', ' if summary.parts }}<b>{{ summary.guarded }}</b> with no clear speech{% endif %}.
+      </span>
+    </div>
+  {% endif %}
+{%- endmacro -%}
+
+
+{%- macro _poster(row) -%}
+  {% if row.thumb_url %}
+    <img src="{{ row.thumb_url }}" alt="" loading="lazy" width="96" height="54"
+         style="display:block;width:96px;height:54px;object-fit:cover;border-radius:6px;background:var(--surface-2)">
+  {% else %}
+    <div class="ad-media ad-media-empty" style="width:96px;height:54px;border-radius:6px;border:1px solid var(--border-soft)"
+         title="No poster yet — one is saved the first time this video is transcribed">
+      {{ '▶' if row.status == 'completed' and not row.guarded else '·' }}
+    </div>
+  {% endif %}
+{%- endmacro -%}
+
+
+{%- macro _language_cell(row) -%}
+  {% if row.status == 'completed' and not row.guarded %}
+    <span title="{% if row.language_overruled %}Provider said {{ row.provider_language_name }}; the transcript's own script says {{ row.language_name }}, and script evidence wins.{% elif row.provider_language_name %}Provider said {{ row.provider_language_name }}; the script agrees.{% else %}Language of the transcript's script.{% endif %}">
+      {{ ui.tag(row.language_name, 'good' if row.language_overruled else '') }}
+    </span>
+    {% if row.language_overruled %}
+      <small class="muted" title="Raw provider code before reconciliation">was {{ row.provider_language_name }}</small>
+    {% endif %}
+  {% elif row.guarded %}
+    {{ ui.tag('no clear speech') }}
+  {% else %}
+    <span class="muted">—</span>
+  {% endif %}
+{%- endmacro -%}
+
+
+{%- macro videos_table(product, videos, video_lang, video_languages, back, base_args={}) -%}
+  {% if video_languages %}
+    <div class="btn-row">
+      <span class="muted small">Videos in</span>
+      <a class="btn sm {{ 'ghost' if video_lang else 'good' }}"
+         href="{{ url_for('products.detail', product_id=product.id, **dict(base_args, vlang=none)) }}"
+         data-drawer="{{ url_for('products.drawer_product', product_id=product.id, **dict(base_args, vlang=none)) }}">All</a>
+      {% for row in video_languages %}
+        <a class="btn sm {{ 'good' if video_lang == row.code else 'ghost' }}"
+           href="{{ url_for('products.detail', product_id=product.id, **dict(base_args, vlang=row.code)) }}"
+           data-drawer="{{ url_for('products.drawer_product', product_id=product.id, **dict(base_args, vlang=row.code)) }}"
+           title="{{ row.scripts }} script{{ '' if row.scripts == 1 else 's' }} across {{ row.transcripts }} video{{ '' if row.transcripts == 1 else 's' }}">{{ row.name }} <span class="tab-count">{{ row.transcripts }}</span></a>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  <div class="table-wrap">
+    <table class="tbl dense" id="videos-table">
+      <thead>
+        <tr>
+          <th>Video</th>
+          <th>Language</th>
+          <th class="num">Length</th>
+          <th>Script</th>
+          <th>Same script</th>
+          <th>Status</th>
+          <th class="right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in videos %}
+          <tr data-transcript-id="{{ row.transcript_id }}" data-searchable
+              data-search-text="{{ row.hook }} {{ row.library_ids|join(' ') }} {{ row.language_name }}">
+            <td class="nowrap">
+              {{ _poster(row) }}
+              <small class="muted mono">
+                {% if row.library_id %}
+                  <a class="page-link external" href="https://www.facebook.com/ads/library/?id={{ row.library_id }}" target="_blank" rel="noopener">{{ row.library_id }} ↗</a>
+                {% else %}—{% endif %}
+              </small>
+            </td>
+            <td class="nowrap">{{ _language_cell(row) }}</td>
+            <td class="num mono">{{ row.duration_label or '—' }}</td>
+            <td class="wrap">
+              {% if row.transcript %}
+                <details>
+                  <summary>{{ row.hook or 'Full script' }}</summary>
+                  <pre class="json-code">{{ row.transcript }}</pre>
+                </details>
+              {% elif row.guarded %}
+                <span class="muted">No speech detected — guarded so it is never billed twice.</span>
+              {% elif row.error %}
+                <span class="muted">{{ row.error }}</span>
+              {% else %}
+                <span class="muted">Not transcribed yet.</span>
+              {% endif %}
+            </td>
+            <td class="nowrap">
+              {#- The cluster number, not the S-label: this table sits beside the
+                  Linked-ads table and the creative grid, which already print
+                  S-<n> once per AD; a third copy per VIDEO would make "how many
+                  ads carry this script" un-countable on the screen. -#}
+              {% if row.cluster_id %}
+                <span class="micro-badge amber"
+                      title="Script cluster {{ row.cluster_id }}: every video tagged #{{ row.cluster_id }} says the same script. The Linked ads table shows it as an S-number.">#{{ row.cluster_id }}</span>
+              {% endif %}
+              {{ ui.chip(row.ad_count ~ ' ad' ~ ('' if row.ad_count == 1 else 's')) }}
+              {% if row.page_count > 1 %}{{ ui.chip(row.page_count ~ ' pages') }}{% endif %}
+            </td>
+            <td class="nowrap">
+              {{ ui.badge(row.status_label) }}
+              {% if row.model_label %}<br><small class="muted mono" title="Provider and model that produced this row">{{ row.model_label }}</small>{% endif %}
+              {% if row.status != 'completed' and row.link_state in ('expired', 'none') %}
+                <br><small class="muted" title="The fbcdn video link carries a signed expiry; this one has passed">link {{ row.link_state }}</small>
+              {% endif %}
+            </td>
+            <td class="right nowrap">
+              {% if row.status != 'processing' %}
+                <form method="post" action="{{ url_for('products.requeue_transcript', product_id=product.id, transcript_id=row.transcript_id, next=back) }}">
+                  <button class="btn sm ghost" type="submit"
+                          title="Queue this creative for a fresh transcription. Nothing runs until you press Generate scripts.">Retranscribe</button>
+                </form>
+              {% endif %}
+            </td>
+          </tr>
+        {% else %}
+          {{ ui.empty_two('No videos transcribed for this product yet.' if not video_lang else 'No videos in this language.',
+                          'Press Generate scripts and every video becomes a row here: its language, its length, its script, and which other ads say the same thing.',
+                          colspan=7) }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{%- endmacro -%}
+
+
+{%- macro ad_transcript_section(intel, ad) -%}
+  <section class="drawer-block">
+    <h3>Language &amp; script</h3>
+    <dl class="facts">
+      <dt>Spoken</dt>
+      <dd>
+        {% if intel.media_language_name %}{{ ui.tag(intel.media_language_name) }}
+        {% elif intel.transcript and intel.transcript.status == 'completed' and not intel.transcript.guarded %}{{ ui.tag(intel.transcript.language_name) }}
+        {% else %}<span class="muted">not transcribed yet</span>{% endif %}
+      </dd>
+      <dt>Ad copy</dt>
+      <dd>{% if intel.text_language_name %}{{ ui.tag(intel.text_language_name) }}{% else %}<span class="muted">not detected</span>{% endif %}</dd>
+      <dt>Final</dt>
+      <dd>{% if intel.final_language_name %}<strong>{{ intel.final_language_name }}</strong> <small class="muted">(spoken beats written)</small>{% else %}<span class="muted">unknown</span>{% endif %}</dd>
+      {% if intel.transcript %}
+        {% set t = intel.transcript %}
+        <dt>Script</dt>
+        <dd>
+          {% if t.script_label %}{{ ui.micro_badge(t.script_label, 'amber') }}{% endif %}
+          {{ ui.badge('guarded' if t.guarded else t.status) }}
+          {% if t.duration_label %}<span class="mono">{{ t.duration_label }}</span>{% endif %}
+          {% if t.ad_count > 1 %}{{ ui.chip(t.ad_count ~ ' ads share this video') }}{% endif %}
+          {% if t.cluster_ads and t.cluster_ads > t.ad_count %}{{ ui.chip(t.cluster_ads ~ ' ads say this script') }}{% endif %}
+          {% if t.language_overruled %}<small class="muted">provider said {{ t.provider_language_name }}; script evidence says {{ t.language_name }}</small>{% endif %}
+        </dd>
+      {% endif %}
+    </dl>
+    {% if intel.transcript and intel.transcript.text %}
+      {% if intel.transcript.hook %}<p class="muted">{{ intel.transcript.hook }}</p>{% endif %}
+      <details><summary>Full transcript</summary><pre class="json-code">{{ intel.transcript.text }}</pre></details>
+    {% elif intel.transcript and intel.transcript.error %}
+      {{ ui.notice(intel.transcript.error, 'amber') }}
+    {% endif %}
+    {% if intel.transcript and intel.transcript.product_id %}
+      <div class="btn-row" style="margin-top:8px">
+        <button type="button" class="btn sm ghost"
+                data-drawer="{{ url_for('products.drawer_product', product_id=intel.transcript.product_id, vlang=intel.transcript.language_code if intel.transcript.language_code != 'und' else none) }}">
+          Other videos of this product{% if intel.transcript.language_code != 'und' %} in {{ intel.transcript.language_name }}{% endif %}
+        </button>
+      </div>
+    {% endif %}
+  </section>
+{%- endmacro -%}

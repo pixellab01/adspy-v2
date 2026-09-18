@@ -1,0 +1,52 @@
+{%- import "_macros.html" as ui -%}
+{#- SERVER MODE only (app/auth.py). Deliberately does NOT extend base.html: the
+    shell's sidebar, dataset chip and database path are for the owner, and this
+    page is what a stranger sees. It borrows the design system's modal card so
+    there is nothing here that app.css does not already define — no style block,
+    no inline styles. Nothing on this page says whether a password was close,
+    how many attempts are left, or what the app behind it holds. -#}
+<!doctype html>
+<html lang="en" data-theme="black">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Log in - Pixellab Ad Spy</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('pixellab-theme');
+        if (t === 'black' || t === 'light') document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body data-page="login">
+<div class="modal-overlay open">
+  <form class="modal" method="post" action="/login" autocomplete="on">
+    <div class="modal-head">
+      <div class="brand">
+        <div class="brand-mark">{{ ui.icon('brand', 17) }}</div>
+        <div class="brand-text"><span class="name">Pixellab</span><span class="sub">Ad Spy</span></div>
+      </div>
+    </div>
+    <div class="modal-body">
+      {%- if error %}
+      <div class="flashes"><div class="flash flash-error" role="alert">{{ error }}</div></div>
+      {%- endif %}
+      <input type="hidden" name="next" value="{{ next_target }}">
+      <div class="field">
+        <label for="password">Admin password</label>
+        <input id="password" class="input-lg" type="password" name="password"
+               autocomplete="current-password" required autofocus>
+        <div class="field-hint">This dashboard is private. The extension does not log in here - it uses the worker token from the Queue screen.</div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      {{ ui.btn('Log in', kind='primary') }}
+    </div>
+  </form>
+</div>
+</body>
+</html>

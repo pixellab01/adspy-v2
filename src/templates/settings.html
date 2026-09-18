@@ -1,0 +1,385 @@
+{#- Settings.
+
+    v1's own /settings is an account manager — "My account", "Login accounts"
+    with Normal/Admin roles, Switch account, Logout — plus one card that is
+    real work: Blocked pages. Decision #4 deletes the accounts half (v2 has no
+    login, no users, no roles), so the Blocked pages card is ported column for
+    column and the rest of this screen is the settings v1 kept elsewhere: the
+    theme, the extension's worker token, the transcription provider keys, the
+    backups and the database facts /health returns as JSON.
+
+    Layout is app.css's .settings-layout: the 230px rail on the left picks a
+    section, the panel on the right renders it. Every mutation is a form POST
+    to app/routes/settings.py — there is no settings JavaScript.
+
+    SECRETS. Nothing on this page prints an API key. The worker token is behind
+    a <details> because copying it into the extension is its entire job. -#}
+{% extends "base.html" %}
+{% import "_macros.html" as ui %}
+
+{% block content %}
+<div class="settings-layout">
+
+  {{ ui.settings_rail(rail, section) }}
+
+  <div class="settings-panel">
+
+  {#- ------------------------------------------------------------ appearance -#}
+  {% if section == 'appearance' %}
+    <section class="settings-section">
+      <h3>Theme</h3>
+      <div class="desc">v1's two themes, v1's two names. Stored in this browser, applied before first paint.</div>
+      <div class="row-2">
+        {{ ui.theme_choice('black', 'Black', 'The default. Amber on near-black.', active=true) }}
+        {{ ui.theme_choice('light', 'White', 'Same tokens, light surfaces.') }}
+      </div>
+    </section>
+
+    <section class="settings-section">
+      <h3>Shell</h3>
+      <div class="desc">Fixed by the design system, listed here so you know what it is.</div>
+      {% call ui.setting_row('Sidebar', '208px, three sections, v1 order') %}
+        {{ ui.chip('locked') }}
+      {% endcall %}
+      {% call ui.setting_row('Fonts', 'Space Grotesk, Inter, JetBrains Mono — self-hosted, no CDN') %}
+        {{ ui.chip('local') }}
+      {% endcall %}
+      {% call ui.setting_row('Search', 'Ctrl K filters the rows on the current screen') %}
+        {{ ui.chip('always on') }}
+      {% endcall %}
+    </section>
+
+  {#- --------------------------------------------------------------- worker -#}
+  {% elif section == 'worker' %}
+    <section class="settings-section">
+      <h3>Worker token</h3>
+      <div class="desc">
+        The shared token the Chrome extension sends on every call to the worker API.
+        There is no login in v2 — this token and the 127.0.0.1 bind are the whole
+        boundary. Paste it into the extension's settings panel.
+      </div>
+
+      {% if token %}
+        {% call ui.setting_row('Token', 'Generated on first use, never rotated behind your back') %}
+          <code class="mono">{{ token_masked }}</code>
+        {% endcall %}
+
+        <details class="token-box">
+          <summary>Reveal and copy</summary>
+          <div class="token-inner">
+            <label for="worker-token">Worker token</label>
+            <input id="worker-token" type="password" value="{{ token }}" readonly
+                   autocomplete="off" spellcheck="false" aria-label="Worker token">
+            <div class="btn-row">
+              {{ ui.btn('Copy', kind='primary', size='sm', type='button',
+                        attrs={'data-copy': '#worker-token'}) }}
+              <span class="field-hint">Copied straight to the clipboard — the value stays masked on screen.</span>
+            </div>
+          </div>
+        </details>
+
+        <div style="height:14px"></div>
+        {% call ui.setting_row('Rotate', 'Every extension using the old token stops working immediately') %}
+          <form method="post" action="{{ url_for('settings.rotate_worker_token') }}">
+            {{ ui.btn('Generate a new token', kind='danger', size='sm') }}
+          </form>
+        {% endcall %}
+        {% if token_updated %}
+          <p class="field-hint">Last changed {{ token_updated }}.</p>
+        {% endif %}
+      {% else %}
+        {{ ui.notice('The worker service (app/job_service.py) is not available, so no token can be issued.', 'red') }}
+      {% endif %}
+    </section>
+
+    <section class="settings-section">
+      <h3>Queue</h3>
+      <div class="desc">The dispatch switch the extension reads on every hello.</div>
+      {% call ui.setting_row('Dispatch', 'Paused means jobs stay put and the extension idles') %}
+        {{ ui.badge('paused' if queue_paused else 'running', 'pending' if queue_paused else 'active') }}
+        {{ ui.btn('Open Queue', href='/queue', kind='ghost', size='sm') }}
+      {% endcall %}
+    </section>
+
+  {#- ------------------------------------------------------------- api keys -#}
+  {% elif section == 'keys' %}
+    <section class="settings-section">
+      <h3>Transcription providers</h3>
+      <div class="desc">
+        Keys for the speech-to-text providers v1 used (services/transcribe_providers.py).
+        Stored in the settings table on this machine. They are never printed on this
+        screen, never written to a log and never echoed in an error — leave a field
+        blank to keep the key that is already there.
+      </div>
+
+      <form method="post" action="{{ url_for('settings.save_api_keys') }}">
+        {% for row in api_keys %}
+          <div class="field">
+            <label for="key-{{ row.key }}">
+              {{ row.label }}
+              {% if row.configured %}{{ ui.badge('configured', 'completed') }}
+              {% elif row.env_fallback %}{{ ui.badge('from ' ~ row.env_name, 'running') }}
+              {% else %}{{ ui.badge('not set', 'inactive') }}{% endif %}
+            </label>
+            <input id="key-{{ row.key }}" type="password" name="{{ row.key }}"
+                   placeholder="{{ row.masked or ('paste a ' ~ row.label ~ ' key') }}"
+                   autocomplete="off" spellcheck="false">
+            <span class="field-hint">
+              {% if row.configured %}Stored {{ row.updated_at }} — showing the last four characters only.
+              {% else %}Falls back to the {{ row.env_name }} environment variable.{% endif %}
+            </span>
+          </div>
+        {% endfor %}
+
+        <div class="field">
+          <label for="provider">Default provider</label>
+          <select id="provider" name="transcription_provider">
+            {% for key, label in providers %}
+              <option value="{{ key }}" {{ 'selected' if key == provider }}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="settings-save-row">{{ ui.btn('Save keys', kind='primary') }}</div>
+      </form>
+    </section>
+
+    <section class="settings-section">
+      <h3>Remove a key</h3>
+      <div class="desc">Deletes the stored value. The provider then falls back to its environment variable, if one is set.</div>
+      {% for row in api_keys %}
+        {% call ui.setting_row(row.label, row.masked or 'Not set') %}
+          <form method="post" action="{{ url_for('settings.clear_api_key') }}">
+            <input type="hidden" name="key" value="{{ row.key }}">
+            {{ ui.btn('Remove', kind='danger', size='sm', disabled=not row.configured) }}
+          </form>
+        {% endcall %}
+      {% endfor %}
+    </section>
+
+  {#- -------------------------------------------------------- blocked pages -#}
+  {% elif section == 'blocked' %}
+    {% set blocked_actions %}
+      <form class="inline-form" method="get" action="{{ url_for('settings.settings_page') }}">
+        <input type="hidden" name="section" value="blocked">
+        <input class="input-sm" type="search" name="q" value="{{ q }}"
+               placeholder="Search by page name, page ID or reason" aria-label="Search blocked pages">
+        {{ ui.btn('Search', kind='ghost', size='sm') }}
+      </form>
+    {% endset %}
+
+    {{ ui.panel_open('Blocked pages',
+         desc='Blocked advertiser pages are hidden from keyword research and skipped by future scrapes. Unblocking restores them; nothing is deleted.',
+         actions=blocked_actions, scroll=true) }}
+      <table class="tbl">
+        {{ ui.thead([('Page',), ('Page ID',), ('Reason',), ('Blocked',), ('', 'tight')]) }}
+        <tbody>
+          {% for row in blocked.rows %}
+            <tr>
+              <td>{{ ui.page_cell(row.live_name or row.page_name_snapshot or 'Unknown page',
+                                  href='/pages/' ~ row.page_id if row.page_id) }}</td>
+              <td class="mono faint">{{ row.platform_page_id }}</td>
+              <td class="wrap">{{ row.reason or '—' }}</td>
+              <td class="mono faint">{{ row.created_at }}</td>
+              <td class="tight">
+                <form method="post" action="{{ url_for('settings.unblock_page', blocked_id=row.id) }}">
+                  <input type="hidden" name="next" value="{{ request.full_path }}">
+                  {{ ui.btn('Unblock', kind='ghost', size='sm') }}
+                </form>
+              </td>
+            </tr>
+          {% else %}
+            {{ ui.empty_state('No blocked pages',
+                 'Pages blocked from a scrape or from the Page Analyzer land here.', colspan=5) }}
+          {% endfor %}
+        </tbody>
+      </table>
+    {{ ui.panel_close() }}
+
+    {% if blocked.total > blocked.rows | length %}
+      {{ ui.pagination(blocked.start, blocked.end, blocked.total,
+           prev_url=url_for('settings.settings_page', section='blocked', q=q or none, page=blocked.page - 1) if blocked.page > 1 else none,
+           next_url=url_for('settings.settings_page', section='blocked', q=q or none, page=blocked.page + 1) if blocked.page < blocked.pages else none,
+           page=blocked.page, pages=blocked.pages, unit='blocked pages') }}
+    {% endif %}
+
+    <div style="height:16px"></div>
+
+    {{ ui.panel_open('Hidden pages',
+         desc='Pages hidden from the Page Analyzer list. Hiding is a view filter, not a block — their ads keep updating.',
+         scroll=true) }}
+      <table class="tbl">
+        {{ ui.thead([('Page',), ('Page ID',), ('Active ads', 'num'), ('Updated',), ('', 'tight')]) }}
+        <tbody>
+          {% for row in hidden %}
+            <tr>
+              <td>{{ ui.page_cell(row.name, href='/pages/' ~ row.id) }}</td>
+              <td class="mono faint">{{ row.platform_page_id }}</td>
+              <td class="num">{{ row.active_ads }}</td>
+              <td class="mono faint">{{ row.updated_at }}</td>
+              <td class="tight">
+                <form method="post" action="{{ url_for('settings.unhide_page', page_id=row.id) }}">
+                  <input type="hidden" name="next" value="{{ request.full_path }}">
+                  {{ ui.btn('Unhide', kind='ghost', size='sm') }}
+                </form>
+              </td>
+            </tr>
+          {% else %}
+            {{ ui.empty_state('No hidden pages', 'Every stored page is visible on the Page Analyzer.', colspan=5) }}
+          {% endfor %}
+        </tbody>
+      </table>
+    {{ ui.panel_close() }}
+
+  {#- -------------------------------------------------------------- backups -#}
+  {% elif section == 'backups' %}
+    {% set backup_actions %}
+      <form method="post" action="{{ url_for('settings.create_backup') }}">
+        {{ ui.btn('Back up now', kind='primary', size='sm') }}
+      </form>
+    {% endset %}
+
+    {{ ui.panel_open('Backups',
+         desc='Snapshots taken with VACUUM INTO — the only safe way to copy a live WAL database. A plain file copy silently misses committed pages.',
+         actions=backup_actions, scroll=true) }}
+      <table class="tbl">
+        {{ ui.thead([('File',), ('Reason',), ('Size', 'num'), ('Created',), ('', 'tight')]) }}
+        <tbody>
+          {% for row in backups %}
+            <tr>
+              <td class="mono">{{ row.filename }}</td>
+              <td>{{ ui.chip(row.reason) }}</td>
+              <td class="num">{{ row.size_mb }} MB</td>
+              <td class="mono faint">{{ row.created_at }}</td>
+              <td class="tight">
+                <form method="post" action="{{ url_for('settings.delete_backup', backup_id=row.id) }}">
+                  {{ ui.btn('Delete', kind='danger', size='sm') }}
+                </form>
+              </td>
+            </tr>
+          {% else %}
+            {{ ui.empty_state('No backups yet', 'Hit "Back up now" — it writes into ' ~ backup_dir ~ '.', colspan=5) }}
+          {% endfor %}
+        </tbody>
+      </table>
+    {{ ui.panel_close() }}
+
+    <div style="height:14px"></div>
+    {{ ui.queue_hint('Backups live in ' ~ backup_dir ~ '. Anything you drop in there by hand shows up in this list on the next load.') }}
+
+  {#- ------------------------------------------------------------- database -#}
+  {% elif section == 'database' %}
+    <section class="settings-section">
+      <h3>Database</h3>
+      <div class="desc">The same facts /health returns, on a screen instead of in JSON.</div>
+      <dl class="facts">
+        <dt>Application</dt><dd>{{ facts.app }} {{ facts.version }}</dd>
+        <dt>Port</dt><dd class="mono">{{ facts.port }} <span class="faint">(v1 keeps 4021)</span></dd>
+        <dt>File</dt><dd class="mono wrap">{{ facts.path }}</dd>
+        <dt>Size</dt><dd class="mono">{{ facts.size_mb }} MB</dd>
+        <dt>Journal</dt><dd>{{ ui.chip(facts.journal_mode) }}</dd>
+        <dt>Foreign keys</dt><dd>{{ ui.badge('on' if facts.foreign_keys else 'off', 'completed' if facts.foreign_keys else 'failed') }}</dd>
+        <dt>Migrations</dt><dd class="mono">{{ facts.migrations | join(', ') or 'none' }}</dd>
+      </dl>
+    </section>
+
+    <section class="settings-section">
+      <h3>Row counts</h3>
+      <div class="desc">What is actually in the database right now.</div>
+      {% call ui.kpi_grid() %}
+        {{ ui.kpi('Pages', '{:,}'.format(facts.counts.pages or 0), mark='P') }}
+        {{ ui.kpi('Ads', '{:,}'.format(facts.counts.ads or 0), mark='A',
+                  delta_label='{:,} active'.format(facts.counts.ads_active or 0)) }}
+        {{ ui.kpi('Products', '{:,}'.format(facts.counts.products or 0), mark='R') }}
+        {{ ui.kpi('Transcripts', '{:,}'.format(facts.counts.transcripts or 0), mark='T') }}
+      {% endcall %}
+      <div style="height:14px"></div>
+      <dl class="facts">
+        <dt>Ad versions</dt><dd class="mono">{{ '{:,}'.format(facts.counts.ad_versions or 0) }}</dd>
+        <dt>Brand groups</dt><dd class="mono">{{ facts.counts.groups or 0 }}</dd>
+        <dt>Jobs</dt><dd class="mono">{{ facts.counts.jobs or 0 }}</dd>
+        <dt>Shortlisted</dt><dd class="mono">{{ facts.counts.shortlisted or 0 }}</dd>
+        <dt>On the test board</dt><dd class="mono">{{ facts.counts.test_queue or 0 }}</dd>
+      </dl>
+    </section>
+
+    <section class="settings-section">
+      <h3>Health</h3>
+      <div class="desc">The endpoint the launcher polls.</div>
+      <div class="btn-row">
+        {{ ui.btn('Open /health', href='/health', kind='ghost', size='sm') }}
+        {{ ui.btn('Queue', href='/queue', kind='ghost', size='sm') }}
+      </div>
+    </section>
+
+  {#- -------------------------------------------------------------- dataset -#}
+  {% elif section == 'dataset' %}
+    <section class="settings-section">
+      <h3>Data version</h3>
+      <div class="desc">
+        Two database files, one switch. <strong>OLD DATA</strong> is everything scraped before the
+        rebuild — browse it, shortlist, hide, group and transcribe as before, but no scan may write
+        to it. <strong>NEW DATA</strong> is the fresh space for the rebuilt tool; every scan from now on
+        lands there. Which one is live is the sidecar file
+        <code class="mono">{{ dataset.sidecar }}</code>, outside both databases, so a switch survives
+        a restart. Missing sidecar means OLD DATA.
+      </div>
+      {% call ui.setting_row('Active now', dataset.path) %}
+        {{ ui.tag(dataset.label, 'live' if dataset.name == 'new' else 'amber') }}
+        {% if dataset.frozen %}{{ ui.badge('scans refused', 'pending') }}{% else %}{{ ui.badge('scans allowed', 'active') }}{% endif %}
+      {% endcall %}
+      {% if dataset.switchable %}
+        {% call ui.setting_row('Switch', 'Refused while a job is claimed or running — stop the queue first. The extension keeps working with the same token.') %}
+          <form method="post" action="{{ url_for('dataset.switch_dataset') }}"
+                data-confirm="Switch to {{ dataset.other_label }}?">
+            <input type="hidden" name="dataset" value="{{ dataset.other }}">
+            {{ ui.btn('Switch to ' ~ dataset.other_label, kind='primary', size='sm') }}
+          </form>
+        {% endcall %}
+        {% if not dataset.new_exists %}
+          {% call ui.setting_row('Create NEW DATA', 'One time. Builds data/adspy2-new.sqlite3 with the schema and nothing else, without switching to it.') %}
+            <form method="post" action="{{ url_for('dataset.create_dataset') }}">
+              {{ ui.btn('Create new dataset', kind='ghost', size='sm') }}
+            </form>
+          {% endcall %}
+        {% endif %}
+      {% else %}
+        {{ ui.notice('This process is pinned to one database by ADSPY2_DB_PATH, so there is nothing to switch.', 'amber') }}
+      {% endif %}
+    </section>
+
+    <section class="settings-section">
+      <h3>Both files</h3>
+      <div class="desc">The inactive file is opened read-only for these counts; nothing here writes to it.</div>
+      <div class="row-2">
+        {% for ds in datasets %}
+          <div class="panel dataset-card{{ ' is-active' if ds.active }}">
+            <div class="panel-head">
+              <div><h3>{{ ui.tag(ds.label, 'live' if ds.name == 'new' else 'amber') }}
+                {% if ds.active %}{{ ui.chip('active') }}{% endif %}</h3></div>
+            </div>
+            <div class="panel-body pad">
+              <dl class="facts">
+                <dt>File</dt><dd class="mono wrap">{{ ds.path }}</dd>
+                <dt>Exists</dt><dd>{{ ui.badge('yes' if ds.exists else 'not created yet', 'completed' if ds.exists else 'inactive') }}</dd>
+                <dt>Size</dt><dd class="mono">{{ ds.size_mb }} MB</dd>
+                {% if ds.exists %}
+                  <dt>Pages</dt><dd class="mono">{{ '{:,}'.format(ds.counts.pages or 0) }}</dd>
+                  <dt>Ads</dt><dd class="mono">{{ '{:,}'.format(ds.counts.ads or 0) }} <span class="faint">({{ '{:,}'.format(ds.counts.ads_active or 0) }} active)</span></dd>
+                  <dt>Products</dt><dd class="mono">{{ '{:,}'.format(ds.counts.products or 0) }}</dd>
+                  <dt>Transcripts</dt><dd class="mono">{{ '{:,}'.format(ds.counts.transcripts or 0) }}</dd>
+                  <dt>Jobs</dt><dd class="mono">{{ '{:,}'.format(ds.counts.jobs or 0) }}</dd>
+                {% endif %}
+              </dl>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+      <div style="height:14px"></div>
+      {{ ui.queue_hint('Worker token and API keys (' ~ carry_over_keys | join(', ') ~ ') were copied into NEW DATA when it was created. Rotating the token later applies only to the active dataset.') }}
+    </section>
+  {% endif %}
+
+  </div>
+</div>
+{% endblock %}

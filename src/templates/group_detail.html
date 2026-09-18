@@ -1,0 +1,308 @@
+{% import "_macros.html" as ui %}
+{% from "_macros.html" import panel_open, panel_close %}
+{% from "group_list.html" import group_rail, page_picker %}
+{% extends "base.html" %}
+
+{#- ---------------------------------------------------------------------------
+    Brand group detail — v1's tabs/brand_group/ui.py:874-880 pane, rebuilt as a
+    real URL instead of JS state.
+
+      head   name / primary domain      Reload · Copy pages · Add pages ·
+                                        Edit · Delete
+      KPIs   Pages · Active ads · Represented · Products · Video ads ·
+             Oldest days                          (v1's six, in v1's order)
+      tabs   Pages | Products
+      pages  Page | Sources | FB results | Ads scraped | Boxes | Products |
+             Oldest | Top product | Actions
+      prods  Product | Domain | Active | Represented | Pages | Age | Video |
+             Image | Actions
+
+    "Boxes" vs "Ads scraped" is v1's distinction and the tooltips are v1's
+    copy: Meta collapses versions, so one captured box can hold five or six
+    ads, and the two numbers are never the same.
+--------------------------------------------------------------------------- #}
+
+{% set qs = request.args.to_dict() %}
+{% set BOXES_HINT = "Unique ad boxes/dialogs captured on the page. One box can hold 5-6 ads when Meta collapses versions." %}
+{% set ADS_SCRAPED_HINT = "Total ads stored, after expanding each box's collapsed versions. Always >= Boxes." %}
+{% set FB_RESULTS_HINT = "The result count Facebook itself prints on this page's Ad Library. Read during the last scrape." %}
+
+{% block title %}{{ group.name }} - Brand Groups - Pixellab Ad Spy{% endblock %}
+{% block heading %}{{ group.name }}{% endblock %}
+
+{% block content %}
+<div class="groups-layout">
+  {{ group_rail(groups, group.id, group_sort, group_search, group_sort_options, rail_total) }}
+
+  <div style="min-width:0">
+
+    {#- head ---------------------------------------------------------- -#}
+    {#- v1's head block + its six-across KPI strip, in v1's order. -#}
+    {% set head_actions %}
+      <a class="btn sm ghost" href="{{ url_for('groups.detail', group_id=group.id, **qs) }}">Reload</a>
+      <input type="text" id="group-page-names" class="mono" hidden readonly value="{{ page_names|join(', ') }}">
+      <button class="btn sm ghost" type="button" data-copy="#group-page-names"
+              title="Copy clean page names from this brand group">Copy pages</button>
+      <a class="btn sm" href="{{ url_for('groups.detail', group_id=group.id, **dict(qs, add='1', edit=none)) }}">Add pages</a>
+      <a class="btn sm" href="{{ url_for('groups.detail', group_id=group.id, **dict(qs, edit='1', add=none)) }}">Edit</a>
+      <form method="post" action="{{ url_for('groups.delete', group_id=group.id) }}">
+        <button class="btn sm danger" type="submit">Delete</button>
+      </form>
+    {% endset %}
+    {% call ui.result_card(group.name,
+                           subtitle=(group.primary_domain or 'No primary domain')
+                                    ~ (' - ' ~ group.category if group.category else ''),
+                           actions=head_actions) %}
+      {{ ui.metric_row([
+           {'value': summary.page_count,       'label': 'Pages'},
+           {'value': summary.live_ads,         'label': 'Active ads'},
+           {'value': summary.represented_ads,  'label': 'Represented',
+            'title': 'Ads after expanding every collapsed version'},
+           {'value': summary.unique_products,  'label': 'Products'},
+           {'value': summary.video_ads,        'label': 'Video ads'},
+           {'value': summary.oldest_days ~ 'd', 'label': 'Oldest days',
+            'title': 'Measured from the oldest Meta ad start date'}]) }}
+    {% endcall %}
+
+    {#- edit / add-pages forms (v1 opens these in a modal) ---------------- -#}
+    {% if edit_open or add_open %}
+      {{ panel_open('Edit brand group' if edit_open else 'Add pages', pad=true) }}
+        <form method="post" action="{{ url_for('groups.edit' if edit_open else 'groups.add_pages', group_id=group.id) }}">
+          <input type="hidden" name="next" value="{{ url_for('groups.detail', group_id=group.id) }}">
+          {% if edit_open %}
+            <div class="row-2">
+              <div class="field">
+                <label for="g-name">Name</label>
+                <input class="input-lg" id="g-name" type="text" name="name" value="{{ group.name }}" required>
+              </div>
+              <div class="field">
+                <label for="g-domain">Primary domain</label>
+                <input class="input-lg" id="g-domain" type="text" name="primary_domain" value="{{ group.primary_domain or '' }}">
+              </div>
+              <div class="field">
+                <label for="g-category">Category</label>
+                <input class="input-lg" id="g-category" type="text" name="category" value="{{ group.category or '' }}">
+              </div>
+              <div class="field">
+                <label for="g-notes">Notes</label>
+                <input class="input-lg" id="g-notes" type="text" name="notes" value="{{ group.notes or '' }}">
+              </div>
+            </div>
+          {% endif %}
+
+          {#- No "select all" box here on purpose: the Pages table below already
+              owns #select-all, and two of them would fight over the same
+              .row-check set in static/app.js. -#}
+          <div class="section-toolbar"><strong>Add pages</strong></div>
+          {{ page_picker(url_for('groups.detail', group_id=group.id), picker_scope, picker_sort,
+                         picker_search, picker_scopes, picker_sorts, picker_pages) }}
+
+          <div class="btn-row" style="margin-top:14px">
+            <a class="btn ghost" href="{{ url_for('groups.detail', group_id=group.id) }}">Cancel</a>
+            <button class="btn primary" type="submit">Save</button>
+          </div>
+        </form>
+      {{ panel_close() }}
+    {% endif %}
+
+    {#- tabs -------------------------------------------------------------- -#}
+    {{ ui.u_tabs([
+         ('pages',    'Pages',    url_for('groups.detail', group_id=group.id, **dict(qs, tab=none, page=none, q=none))),
+         ('products', 'Products', url_for('groups.detail', group_id=group.id, **dict(qs, tab='products', page=none, q=none)))
+       ], tab) }}
+
+    {% if tab == 'pages' %}
+
+      <section class="screen-toolbar">
+        <form class="inline-form" method="get" action="{{ url_for('groups.detail', group_id=group.id) }}">
+          <input type="hidden" name="gsort" value="{{ group_sort }}">
+          <select name="cat" aria-label="Page category">
+            {% for key, label in page_categories %}
+              <option value="{{ key }}" {{ 'selected' if pages.category == key }}>{{ label }}</option>
+            {% endfor %}
+          </select>
+          <select name="ord" aria-label="Sort pages">
+            {% for key, label in page_orders %}
+              <option value="{{ key }}" {{ 'selected' if pages.order == key }}>{{ label }}</option>
+            {% endfor %}
+          </select>
+          <input type="search" name="q" value="{{ pages.search }}" placeholder="Search page or top product" size="20">
+          <button class="btn" type="submit">Apply</button>
+        </form>
+        <span class="result-count">{{ pages.total }} pages</span>
+      </section>
+
+      <form method="post" action="{{ url_for('groups.retrack_pages', group_id=group.id) }}" id="group-pages">
+        <input type="hidden" name="next" value="{{ request.full_path }}">
+        <div class="bulk-bar">
+          <button class="btn primary" type="submit" id="retrack-selected" disabled>
+            Re-track selected (<span id="selected-count">0</span>)
+          </button>
+          <button class="btn" type="submit" name="tracked" value="1"
+                  formaction="{{ url_for('groups.track_pages', group_id=group.id) }}">Track selected</button>
+          <button class="btn ghost" type="submit" name="tracked" value="0"
+                  formaction="{{ url_for('groups.track_pages', group_id=group.id) }}">Untrack selected</button>
+        </div>
+
+        {% set page_actions %}{{ ui.tag(pages['items']|length ~ ' rows') }}{% endset %}
+        {{ panel_open('Pages in this group', actions=page_actions, scroll=true) }}
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th class="tight"><input type="checkbox" id="select-all" title="select all"></th>
+                <th>Page</th>
+                <th class="num">Sources</th>
+                <th class="num" title="{{ FB_RESULTS_HINT }}">FB results</th>
+                <th class="num" title="{{ ADS_SCRAPED_HINT }}">Ads scraped</th>
+                <th class="num" title="{{ BOXES_HINT }}">Boxes</th>
+                <th class="num">Products</th>
+                <th class="num">Oldest</th>
+                <th>Top product</th>
+                <th class="right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in pages['items'] %}
+                <tr data-searchable data-search-text="{{ row.page_name }} {{ row.platform_page_id }} {{ row.top_product }}">
+                  <td class="tight"><input type="checkbox" class="row-check" name="page_ids" value="{{ row.id }}"></td>
+                  <td>
+                    {%- set row_badges %}{% if row.is_tracked %}{{ ui.tag('tracked', 'blue') }}{% endif %}{% endset -%}
+                    {{ ui.page_cell(row.page_name, meta='ID ' ~ (row.platform_page_id or '—'),
+                                    href=url_for('pages.detail', page_id=row.id), badges=row_badges) }}
+                  </td>
+                  <td class="num">{{ row.source_page_count }}</td>
+                  <td class="num">{{ ui.fb_cell(row.fb_results, row.fb_results_age_days,
+                                                (row.fb_results_captured_at or '')[:10]) }}</td>
+                  <td class="num" title="{{ ADS_SCRAPED_HINT }}">{{ row.ads_scraped }}</td>
+                  <td class="num" title="{{ BOXES_HINT }}"><span class="adcount">{{ row.ad_boxes }}</span></td>
+                  <td class="num">{{ row.unique_products }}</td>
+                  <td class="num">{{ row.oldest_days }}d</td>
+                  <td class="wrap">{{ row.top_product or '—' }}</td>
+                  <td class="right nowrap">
+                    <div class="btn-row" style="justify-content:flex-end;flex-wrap:nowrap">
+                      {% if row.library_url %}
+                        <a class="btn sm ghost" href="{{ row.library_url }}" target="_blank" rel="noopener">Meta ↗</a>
+                      {% endif %}
+                      <button class="btn sm {{ 'good' if row.is_tracked else 'ghost' }}" type="submit" form="group-pages"
+                              name="tracked" value="{{ '0' if row.is_tracked else '1' }}"
+                              formaction="{{ url_for('groups.track_pages', group_id=group.id) }}">{{ 'Untrack' if row.is_tracked else 'Track' }}</button>
+                      <button class="btn sm" type="submit" form="group-pages"
+                              formaction="{{ url_for('groups.retrack_pages', group_id=group.id) }}">Re-track</button>
+                      <button class="btn sm warn" type="submit" form="group-pages"
+                              formaction="{{ url_for('pages.hide_page', page_id=row.id) }}">Hide</button>
+                      <button class="btn sm danger" type="submit" form="group-pages"
+                              formaction="{{ url_for('groups.remove_page', group_id=group.id, page_id=row.id) }}">Ungroup</button>
+                    </div>
+                  </td>
+                </tr>
+              {% else %}
+                {{ ui.empty_two('No matching pages.', 'Clear the category filter, or use "Add pages".', colspan=10) }}
+              {% endfor %}
+            </tbody>
+          </table>
+        {{ panel_close() }}
+      </form>
+
+      {{ ui.pagination(pages.start, pages.end, pages.total,
+           url_for('groups.detail', group_id=group.id, **dict(qs, page=pages.page - 1)) if pages.has_previous else none,
+           url_for('groups.detail', group_id=group.id, **dict(qs, page=pages.page + 1)) if pages.has_next else none,
+           pages.page, pages.pages, 'pages') }}
+
+    {% else %}
+
+      <section class="screen-toolbar">
+        <form class="inline-form" method="get" action="{{ url_for('groups.detail', group_id=group.id) }}">
+          <input type="hidden" name="tab" value="products">
+          <input type="hidden" name="gsort" value="{{ group_sort }}">
+          <select name="vis" aria-label="Product visibility">
+            {% for key, label in product_visibility %}
+              <option value="{{ key }}" {{ 'selected' if products.visibility == key }}>{{ label }}</option>
+            {% endfor %}
+          </select>
+          <select name="psort" aria-label="Sort products">
+            {% for key, label in product_sorts %}
+              <option value="{{ key }}" {{ 'selected' if products.sort == key }}>{{ label }}</option>
+            {% endfor %}
+          </select>
+          <select name="age" aria-label="Ad age">
+            {% for key, label in product_ages %}
+              <option value="{{ key }}" {{ 'selected' if products.age_bucket == key }}>{{ label }}</option>
+            {% endfor %}
+          </select>
+          <input type="number" min="0" name="min_active" value="{{ products.min_active if products.min_active is not none }}" placeholder="Min active">
+          <input type="number" min="0" name="min_represented" value="{{ products.min_represented if products.min_represented is not none }}" placeholder="Min represented">
+          <input type="number" min="0" name="min_pages" value="{{ products.min_pages if products.min_pages is not none }}" placeholder="Min pages">
+          <input type="search" name="q" value="{{ products.search }}" placeholder="Search product / URL" size="18">
+          <button class="btn" type="submit">Apply</button>
+        </form>
+        <span class="result-count">{{ products.total }} products</span>
+      </section>
+
+      {% set product_actions %}{{ ui.tag(products['items']|length ~ ' rows') }}{% endset %}
+      {{ panel_open('Products in this group', actions=product_actions, scroll=true) }}
+        <table class="tbl dense">
+          <thead>
+            <tr>
+              <th>Product</th><th>Domain</th>
+              <th class="num">Active</th><th class="num">Represented</th>
+              <th class="num">Pages</th><th class="num">Age</th>
+              <th class="num">Video</th><th class="num">Image</th>
+              <th class="right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in products['items'] %}
+              <tr data-searchable data-search-text="{{ row.product_name }} {{ row.store_domain }}">
+                {#- Same rule as the Products screen: the name cell opens the
+                    shared product drawer in place, and the href underneath stays
+                    a real /products/<id> deep link for cmd-click and no-JS. -#}
+                <td class="col-product"
+                    data-drawer="{{ url_for('products.drawer_product', product_id=row.id) }}"
+                    title="Open {{ row.product_name }}">{{ ui.page_cell(
+                     row.product_name,
+                     meta=(row.product_link | short_url) or row.store_domain or 'no product URL',
+                     meta_title=row.product_link or '',
+                     href=url_for('products.detail', product_id=row.id)) }}</td>
+                <td class="muted">{{ row.store_domain or '—' }}</td>
+                <td class="num"><span class="adcount">{{ row.active_ads }}</span></td>
+                <td class="num">{{ row.represented_ads }}</td>
+                <td class="num">{{ row.page_count }}</td>
+                <td class="num">{{ row.age_label }}</td>
+                <td class="num">{{ row.video_ads }}</td>
+                <td class="num">{{ row.image_ads }}</td>
+                <td class="right nowrap">
+                  <div class="btn-row" style="justify-content:flex-end;flex-wrap:nowrap">
+                    <form method="post" action="{{ url_for('products.set_state', product_id=row.id, next=request.full_path) }}">
+                      <input type="hidden" name="field" value="tracked">
+                      <input type="hidden" name="on" value="{{ '0' if row.is_tracked else '1' }}">
+                      <button class="btn sm {{ 'good' if row.is_tracked else 'ghost' }}" type="submit">{{ 'Untrack' if row.is_tracked else 'Track' }}</button>
+                    </form>
+                    <form method="post" action="{{ url_for('products.set_state', product_id=row.id, next=request.full_path) }}">
+                      <input type="hidden" name="field" value="hidden">
+                      <input type="hidden" name="on" value="{{ '0' if row.is_hidden else '1' }}">
+                      <button class="btn sm {{ 'warn' if not row.is_hidden else 'ghost' }}" type="submit">{{ 'Unhide' if row.is_hidden else 'Hide' }}</button>
+                    </form>
+                    <form method="post" action="{{ url_for('products.remove', product_id=row.id, next=request.full_path) }}">
+                      <button class="btn sm danger" type="submit">Remove</button>
+                    </form>
+                  </div>
+                </td>
+              </tr>
+            {% else %}
+              {{ ui.empty_two('No matching products.', 'Loosen the filters, or add more pages to this group.', colspan=9) }}
+            {% endfor %}
+          </tbody>
+        </table>
+      {{ panel_close() }}
+
+      {{ ui.pagination(products.start, products.end, products.total,
+           url_for('groups.detail', group_id=group.id, **dict(qs, page=products.page - 1)) if products.has_previous else none,
+           url_for('groups.detail', group_id=group.id, **dict(qs, page=products.page + 1)) if products.has_next else none,
+           products.page, products.pages, 'products') }}
+
+    {% endif %}
+  </div>
+</div>
+
+{{ ui.drawer_mount('Product details') }}
+{% endblock %}

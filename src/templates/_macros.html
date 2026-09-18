@@ -1,0 +1,609 @@
+{# ===========================================================================
+   _macros.html — v2's shared component vocabulary.
+
+   THE CONTRACT. Every screen imports this and uses these macros. Nobody
+   re-invents a panel, a table head, a pill tab, a badge or an empty state,
+   and nobody writes a <style> block: static/app.css already carries v1's
+   whole design system, and these macros emit exactly the class names it
+   styles.
+
+       from "_macros.html" import panel, pill_tabs, badge, empty_state
+       import "_macros.html" as ui        -- then ui.panel(...), ui.icon(...)
+
+   Two shapes of macro:
+
+     * plain      badge('running')
+     * wrapping   call panel('Stored pages', desc='...') ... endcall
+                  (Jinja's call tag: the body lands where the macro says
+                  caller().)
+
+   To put buttons in a panel head, build them into a variable first — Jinja
+   has no slots:
+
+       set head_actions
+         <a class="btn sm ghost" href="/export.csv">Export CSV</a>
+       endset
+       call panel('Top pages', actions=head_actions) ... endcall
+
+   Where a macro takes `attrs`, pass a dict: attrs={'data-page-id': 41}.
+
+   NAV_SECTIONS / PAGE_META at the bottom of this file are the navigation
+   contract — base.html renders them and tests/test_design_system.py checks
+   them against v1.
+=========================================================================== #}
+
+
+{#- ord() for ASCII, which Jinja does not have: ASCII_TABLE.find(c) + 32.
+    Used only by avatar_color, so a page keeps the same colour v1 gave it.
+    A non-ASCII character scores 31 instead of its real code point — the
+    colour still lands in the palette, it just is not v1's. -#}
+{%- set ASCII_TABLE = ' !"#$%&\'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~' -%}
+{%- set AVATAR_COLORS = ['#f5a623','#5ea8ff','#3ddc84','#b794f6','#ff6b6b','#ffb838','#4fd1c5','#f687b3'] -%}
+
+
+{# =========================================================================
+   1. ICONS — v1's set, path data verbatim from services/web.py:15-30.
+   ========================================================================= #}
+{%- set ICONS = {
+  'overview':    '<path d="M4 4h16v16H4z"/><path d="M4 9h16"/>',
+  'alerts':      '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  'session':     '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/>',
+  'keyword':     '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
+  'pages':       '<path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1.5-1.5"/>',
+  'product':     '<path d="M4 7l8-4 8 4-8 4z"/><path d="M4 7v10l8 4 8-4V7"/><path d="M12 11v10"/>',
+  'brand_group': '<circle cx="7" cy="8" r="3"/><circle cx="17" cy="8" r="3"/><path d="M2.5 20v-2.5A4.5 4.5 0 0 1 7 13h0a4.5 4.5 0 0 1 4.5 4.5V20"/><path d="M12.5 20v-2.5A4.5 4.5 0 0 1 17 13h0a4.5 4.5 0 0 1 4.5 4.5V20"/>',
+  'winners':     '<path d="M8 21h8M12 17v4M7 4h10v4a5 5 0 0 1-10 0z"/><path d="M7 6H4v2a4 4 0 0 0 4 4M17 6h3v2a4 4 0 0 1-4 4"/>',
+  'test_queue':  '<path d="M5 4h14v16H5z"/><path d="M9 8h6M9 12h6M9 16h4"/><path d="M3 8h2M19 8h2"/>',
+  'report':      '<path d="M5 3h14v18H5z"/><path d="M8 7h8M8 11h8M8 15h5"/>',
+  'queue':       '<path d="M4 6h16M4 12h12M4 18h8"/><circle cx="19" cy="12" r="2"/><circle cx="15" cy="18" r="2"/>',
+  'settings':    '<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9L7 7M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/>',
+  'sun':         '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"/>',
+  'search':      '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
+  'brand':       '<path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"/>',
+  'close':       '<path d="M6 6l12 12M18 6L6 18"/>',
+  'external':    '<path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
+  'refresh':     '<path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/>',
+  'plus':        '<path d="M12 5v14M5 12h14"/>',
+  'check':       '<path d="M4 12.5l5 5L20 6.5"/>',
+  'info':        '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/>',
+  'star':        '<path d="M12 2l3 6.5 7 .9-5 4.8 1.3 7-6.6-3.6-6.6 3.6 1.3-7-5-4.8 7-.9z"/>'
+} -%}
+
+{%- macro icon(name, size=16) -%}
+<svg width="{{ size }}" height="{{ size }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">{{ ICONS.get(name, '')|safe }}</svg>
+{%- endmacro -%}
+
+{#- The favourite star: filled when on, outline when off. -#}
+{%- macro star_icon(on=false) -%}
+<svg viewBox="0 0 24 24" fill="{{ 'currentColor' if on else 'none' }}" stroke="currentColor" stroke-width="1.6" aria-hidden="true">{{ ICONS['star']|safe }}</svg>
+{%- endmacro -%}
+
+
+{# =========================================================================
+   2. AVATARS — deterministic initials + colour (Overview's 8-colour set).
+   Foreground is always near-black; avatars do not change with the theme.
+   ========================================================================= #}
+{%- macro initials(name) -%}
+{%- set text = (name or '')|string|replace('-', ' ')|replace('_', ' ')|trim -%}
+{%- set words = text.split() -%}
+{%- if words -%}{{ (words[:2]|map('first')|join)|upper }}
+{%- elif text -%}{{ text[:2]|upper }}
+{%- else -%}?{%- endif -%}
+{%- endmacro -%}
+
+{%- macro avatar_color(name) -%}
+{%- set ns = namespace(total=0) -%}
+{%- for ch in (name or '')|string -%}
+{%- set ns.total = ns.total + ASCII_TABLE.find(ch) + 32 -%}
+{%- endfor -%}
+{{- AVATAR_COLORS[ns.total % 8] -}}
+{%- endmacro -%}
+
+{#- <span class="page-ava">NB</span> — the square in front of every page row. -#}
+{%- macro avatar(name, color=none, attrs={}) -%}
+<span class="page-ava" style="background:{{ color or avatar_color(name) }}"{{ attrs|xmlattr }}>{{ initials(name) }}</span>
+{%- endmacro -%}
+
+{%- macro mini_avatar(name, color=none) -%}
+<span class="mini" style="background:{{ color or avatar_color(name) }}">{{ initials(name) }}</span>
+{%- endmacro -%}
+
+
+{# =========================================================================
+   3. PANEL — the only container. v1 has no .card and neither do we.
+   Tables go in a bare body (padding 6px 0) so the row rules reach the panel
+   edge; prose and forms want pad=true.
+   ========================================================================= #}
+{%- macro panel(title=none, desc='', actions=none, pad=false, scroll=false, attrs={}) -%}
+<section class="panel"{{ attrs|xmlattr }}>
+  {%- if title or actions %}
+  <div class="panel-head">
+    <div>
+      {%- if title %}<h3>{{ title }}</h3>{% endif %}
+      {%- if desc %}<div class="desc">{{ desc }}</div>{% endif %}
+    </div>
+    {%- if actions %}<div class="actions">{{ actions }}</div>{% endif %}
+  </div>
+  {%- endif %}
+  <div class="panel-body{{ ' pad' if pad }}{{ ' scroll' if scroll }}">{{ caller() }}</div>
+</section>
+{%- endmacro -%}
+
+{#- Same panel, split in two, for a body that is easier to write flat. -#}
+{%- macro panel_open(title=none, desc='', actions=none, pad=false, scroll=false, attrs={}) -%}
+<section class="panel"{{ attrs|xmlattr }}>
+  {%- if title or actions %}
+  <div class="panel-head">
+    <div>
+      {%- if title %}<h3>{{ title }}</h3>{% endif %}
+      {%- if desc %}<div class="desc">{{ desc }}</div>{% endif %}
+    </div>
+    {%- if actions %}<div class="actions">{{ actions }}</div>{% endif %}
+  </div>
+  {%- endif %}
+  <div class="panel-body{{ ' pad' if pad }}{{ ' scroll' if scroll }}">
+{%- endmacro -%}
+
+{%- macro panel_close() -%}
+  </div>
+</section>
+{%- endmacro -%}
+
+{#- The page-detail header block: big title, sub-line, then a metric strip. -#}
+{%- macro result_card(title, subtitle='', actions=none) -%}
+<section class="result-card">
+  <div class="result-head">
+    <div class="main-copy">
+      <h2>{{ title }}</h2>
+      {%- if subtitle %}<div class="page-meta">{{ subtitle }}</div>{% endif %}
+    </div>
+    {%- if actions %}<div class="btn-row">{{ actions }}</div>{% endif %}
+  </div>
+  {{ caller() if caller is defined }}
+</section>
+{%- endmacro -%}
+
+
+{# =========================================================================
+   4. METRICS — mini metric strip, KPI tile, drawer stat.
+   ========================================================================= #}
+{#- items: list of {value, label, tone} — tone '' | 'stale' | 'very-stale' -#}
+{%- macro metric_row(items) -%}
+<div class="metric-row">
+  {%- for item in items %}
+  <div class="mini-metric{{ ' ' ~ item.tone if item.get('tone') }}"{% if item.get('title') %} title="{{ item.title }}"{% endif %}>
+    <div class="v">{{ item.value }}</div>
+    <div class="l">{{ item.label }}</div>
+  </div>
+  {%- endfor %}
+</div>
+{%- endmacro -%}
+
+{%- macro mini_metric(value, label, tone='', title='') -%}
+<div class="mini-metric{{ ' ' ~ tone if tone }}"{% if title %} title="{{ title }}"{% endif %}>
+  <div class="v">{{ value }}</div><div class="l">{{ label }}</div>
+</div>
+{%- endmacro -%}
+
+{#- One Overview KPI. `mark` is v1's bare letter in the amber square.
+    direction: 'up' | 'down' | '' -#}
+{%- macro kpi(label, value, mark='', delta='', delta_label='', direction='', value_color='') -%}
+<div class="kpi">
+  <div class="kpi-label">{% if mark %}<span class="ic" aria-hidden="true">{{ mark }}</span>{% endif %} {{ label }}</div>
+  <div class="kpi-val"{% if value_color %} style="color:{{ value_color }}"{% endif %}>{{ value }}</div>
+  <div class="kpi-delta{{ ' ' ~ direction if direction }}">
+    {%- if delta %}{{ delta }} {% endif %}
+    <span class="lbl">{{ delta_label or '&nbsp;'|safe }}</span>
+  </div>
+</div>
+{%- endmacro -%}
+
+{%- macro kpi_grid() -%}
+<div class="kpi-grid">{{ caller() }}</div>
+{%- endmacro -%}
+
+{%- macro dstat(value, label) -%}
+<div class="dstat"><div class="v">{{ value }}</div><div class="l">{{ label }}</div></div>
+{%- endmacro -%}
+
+
+{# =========================================================================
+   5. TABS — three variants, all of v1's.
+     pill_tabs    Page Analyzer / Keyword Research / Products  (the default)
+     filter_group Overview's segmented tray
+     u_tabs       Brand Groups' underline row
+
+   items: list of (key, label) or (key, label, href) or (key, label, href, count)
+   Give an href and you get a link (works with JS off); leave it out and you
+   get a <button data-tab="key"> that static/app.js switches client-side by
+   toggling [data-tab-panel="key"].
+   ========================================================================= #}
+{%- macro _tab_parts(item) -%}{{ item }}{%- endmacro -%}
+
+{%- macro pill_tabs(items, current, aria='Sections', group='') -%}
+<nav class="pill-tabs"{% if group %} data-tab-group="{{ group }}"{% endif %} aria-label="{{ aria }}">
+  {%- for item in items %}
+    {%- set key = item[0] %}{% set label = item[1] %}
+    {%- set href = item[2] if item|length > 2 else none %}
+    {%- set count = item[3] if item|length > 3 else none %}
+    {%- if href %}
+      <a class="pill-tab{{ ' on' if key == current }}" href="{{ href }}">{{ label }}
+        {%- if count is not none %}<span class="tab-count">{{ count }}</span>{% endif %}</a>
+    {%- else %}
+      <button class="pill-tab{{ ' on' if key == current }}" type="button" data-tab="{{ key }}"
+              aria-pressed="{{ 'true' if key == current else 'false' }}">{{ label }}
+        {%- if count is not none %}<span class="tab-count">{{ count }}</span>{% endif %}</button>
+    {%- endif %}
+  {%- endfor %}
+</nav>
+{%- endmacro -%}
+
+{%- macro filter_group(items, current, aria='Filters') -%}
+<div class="filter-group" role="group" aria-label="{{ aria }}">
+  {%- for item in items %}
+    {%- set key = item[0] %}{% set label = item[1] %}
+    {%- set href = item[2] if item|length > 2 else none %}
+    {%- set count = item[3] if item|length > 3 else none %}
+    {%- if href %}
+      <a class="filter-btn{{ ' on' if key == current }}" href="{{ href }}">{{ label }}
+        {%- if count is not none %}<span class="count-pill">{{ count }}</span>{% endif %}</a>
+    {%- else %}
+      <button class="filter-btn{{ ' on' if key == current }}" type="button" data-tab="{{ key }}"
+              aria-pressed="{{ 'true' if key == current else 'false' }}">{{ label }}
+        {%- if count is not none %}<span class="count-pill">{{ count }}</span>{% endif %}</button>
+    {%- endif %}
+  {%- endfor %}
+</div>
+{%- endmacro -%}
+
+{%- macro u_tabs(items, current) -%}
+<nav class="u-tabs">
+  {%- for item in items %}
+    {%- set key = item[0] %}{% set label = item[1] %}
+    {%- set href = item[2] if item|length > 2 else none %}
+    {%- if href %}<a class="u-tab{{ ' active' if key == current }}" href="{{ href }}">{{ label }}</a>
+    {%- else %}<button class="u-tab{{ ' active' if key == current }}" type="button" data-tab="{{ key }}">{{ label }}</button>{% endif %}
+  {%- endfor %}
+</nav>
+{%- endmacro -%}
+
+{#- The row a tab bar usually sits in: tabs left, count right. -#}
+{%- macro section_toolbar() -%}
+<div class="section-toolbar">{{ caller() }}</div>
+{%- endmacro -%}
+
+{#- Panel shown/hidden by pill_tabs when no href was given. -#}
+{%- macro tab_panel(key, current) -%}
+<section data-tab-panel="{{ key }}"{{ '' if key == current else ' hidden' }}>{{ caller() }}</section>
+{%- endmacro -%}
+
+
+{# =========================================================================
+   6. BUTTONS
+   kind: '' | 'primary' | 'ghost' | 'danger' | 'warn' | 'good'
+   size: '' | 'sm'
+   ========================================================================= #}
+{%- macro btn(label, href=none, kind='', size='', type='submit', name=none, value=none, disabled=false, title='', attrs={}) -%}
+{%- set classes = ('btn ' ~ kind ~ ' ' ~ size)|trim -%}
+{%- if href -%}
+<a class="{{ classes }}{{ ' disabled' if disabled }}" href="{{ href }}"{% if title %} title="{{ title }}"{% endif %}{{ attrs|xmlattr }}>{{ label }}</a>
+{%- else -%}
+<button class="{{ classes }}" type="{{ type }}"{% if name %} name="{{ name }}"{% endif %}{% if value is not none %} value="{{ value }}"{% endif %}{% if disabled %} disabled{% endif %}{% if title %} title="{{ title }}"{% endif %}{{ attrs|xmlattr }}>{{ label }}</button>
+{%- endif -%}
+{%- endmacro -%}
+
+{%- macro link_btn(label, href, external=false) -%}
+<a class="page-link {{ 'external' if external else 'internal' }}" href="{{ href }}"{% if external %} target="_blank" rel="noopener"{% endif %}>{{ label }}</a>
+{%- endmacro -%}
+
+{#- Square icon toggle (favourite / track). `on` drives the amber state. -#}
+{%- macro icon_btn(name, on=false, title='', kind='', attrs={}) -%}
+<button class="icon-btn{{ ' ' ~ kind if kind }}{{ ' on' if on }}" type="button" aria-pressed="{{ 'true' if on else 'false' }}"
+        title="{{ title }}" aria-label="{{ title }}"{{ attrs|xmlattr }}>{{ star_icon(on) if name == 'star' else icon(name, 18) }}</button>
+{%- endmacro -%}
+
+{%- macro fav_star(on=false, title='', attrs={}) -%}
+<button class="fav-star{{ ' on' if on }}" type="button" aria-pressed="{{ 'true' if on else 'false' }}"
+        title="{{ title or ('Unpin from favorites' if on else 'Pin to favorites') }}"
+        aria-label="{{ title or ('Unpin from favorites' if on else 'Pin to favorites') }}"{{ attrs|xmlattr }}>{{ star_icon(on) }}</button>
+{%- endmacro -%}
+
+
+{# =========================================================================
+   7. BADGES, PILLS, CHIPS
+   Colour rule: completed/active green - failed/cancelled red -
+   pending/claimed amber - running blue - neutral grey.
+   ========================================================================= #}
+{%- set STATUS_KIND = {
+  'completed':'completed','done':'done','active':'active','winner':'completed','success':'completed',
+  'running':'running','claimed':'claimed','processing':'running','testing':'testing',
+  'pending':'pending','queued':'queued','waiting':'pending',
+  'failed':'failed','error':'failed','cancelled':'cancelled','killed':'killed','blocked':'failed',
+  'idle':'inactive','skipped':'inactive','inactive':'inactive','stopped':'inactive'
+} -%}
+
+{%- macro badge(text, kind='') -%}
+<span class="badge{{ ' badge-' ~ (kind or STATUS_KIND.get(text|string|lower, '')) if (kind or STATUS_KIND.get(text|string|lower, '')) }}">{{ text }}</span>
+{%- endmacro -%}
+
+{%- macro status_pill(state, label=none) -%}
+<span class="status-pill {{ STATUS_KIND.get(state|string|lower, '') }}">{{ label or state }}</span>
+{%- endmacro -%}
+
+{%- macro tag(text, kind='') -%}<span class="tag{{ ' ' ~ kind if kind }}">{{ text }}</span>{%- endmacro -%}
+{%- macro chip(text, kind='') -%}<span class="chip{{ ' ' ~ kind if kind }}">{{ text }}</span>{%- endmacro -%}
+{%- macro grp_badge(text) -%}<span class="grp-badge">{{ text }}</span>{%- endmacro -%}
+{%- macro micro_badge(text, kind='') -%}<span class="micro-badge{{ ' ' ~ kind if kind }}">{{ text }}</span>{%- endmacro -%}
+
+{#- Age pill: hot <30d, warm 30-119d, cool 120d+. -#}
+{%- macro days_pill(days) -%}
+{%- if days is none -%}<span class="days-pill cool">—</span>
+{%- else -%}
+{%- set band = 'hot' if days < 30 else ('warm' if days < 120 else 'cool') -%}
+<span class="days-pill {{ band }}">{{ days }}d</span>
+{%- endif -%}
+{%- endmacro -%}
+
+{#- The green "live" pill with the amber pulsing dot. -#}
+{%- macro live_badge(text='live', busy=false, stale=false) -%}
+<span class="live-badge{{ ' busy' if busy }}{{ ' stale' if stale }}"><span></span>{{ text }}</span>
+{%- endmacro -%}
+
+
+{# =========================================================================
+   8. TABLE PARTS
+   ========================================================================= #}
+{#- cols: list of (label,) | (label, class) | (label, class, title) -#}
+{%- macro thead(cols) -%}
+<thead><tr>
+  {%- for col in cols %}
+  <th{% if col|length > 1 and col[1] %} class="{{ col[1] }}"{% endif %}{% if col|length > 2 and col[2] %} title="{{ col[2] }}"{% endif %}>{{ col[0] }}</th>
+  {%- endfor %}
+</tr></thead>
+{%- endmacro -%}
+
+{#- A sortable column header. The caller builds the href (only it knows the
+    screen's query string); this only paints the state. -#}
+{%- macro sort_th(label, href, is_sorted=false, direction='desc') -%}
+<a class="sort{{ ' is-sorted' if is_sorted }}" href="{{ href }}">{{ label }}<span class="sort-caret">{{ '▾' if (is_sorted and direction == 'desc') else ('▴' if is_sorted else '') }}</span></a>
+{%- endmacro -%}
+
+{#- The signature row cell: avatar, bold name, muted second line.
+    v1 joins the second line with ' - ' (hyphen, never an en-dash). -#}
+{%- macro page_cell(name, meta='', href=none, color=none, badges=none, lead=none, meta_title='') -%}
+<div class="page-cell">
+  {%- if lead %}{{ lead }}{% endif %}
+  {{ avatar(name, color) }}
+  <div class="page-copy">
+    <div class="page-name">
+      {%- if href %}<a href="{{ href }}">{{ name }}</a>{% else %}{{ name }}{% endif %}
+      {%- if badges %}{{ badges }}{% endif %}
+    </div>
+    {%- if meta %}<div class="page-meta"{% if meta_title %} title="{{ meta_title }}"{% endif %}>{{ meta }}</div>{% endif %}
+  </div>
+</div>
+{%- endmacro -%}
+
+{#- FB-results cell with v1's staleness colouring: >7d amber, >30d red. -#}
+{%- macro fb_cell(value, age_days=none, captured_at='') -%}
+{%- set tone = '' if age_days is none else ('very-stale' if age_days > 30 else ('stale' if age_days > 7 else '')) -%}
+<span class="fb-cell{{ ' ' ~ tone if tone }}{{ ' empty-value' if value is none }}">
+  <span class="fb-value">{{ value if value is not none else '—' }}</span>
+  {%- if value is none %}<small>not captured yet</small>
+  {%- elif age_days is not none %}<small>{{ captured_at }}{{ ' - ' if captured_at }}{{ age_days }}d ago</small>{% endif %}
+</span>
+{%- endmacro -%}
+
+{%- macro pagination(start, end, total, prev_url=none, next_url=none, page=1, pages=1, unit='rows') -%}
+<div class="pagination">
+  <div class="range">Showing <strong>{{ start }}</strong>-<strong>{{ end }}</strong> of <strong>{{ total }}</strong> {{ unit }}</div>
+  <div class="page-controls">
+    <a class="btn sm ghost{{ ' disabled' if not prev_url }}" {% if prev_url %}href="{{ prev_url }}"{% endif %}>Previous</a>
+    <span>Page <strong>{{ page }}</strong> of <strong>{{ pages }}</strong></span>
+    <a class="btn sm ghost{{ ' disabled' if not next_url }}" {% if next_url %}href="{{ next_url }}"{% endif %}>Next</a>
+  </div>
+</div>
+{%- endmacro -%}
+
+
+{# =========================================================================
+   9. EMPTY STATES — v1's three. Copy matters: it is part of the feel.
+   Inside a table use colspan so the message centres under the header.
+   ========================================================================= #}
+{%- macro empty_state(title, hint='', colspan=none) -%}
+{%- if colspan %}<tr><td colspan="{{ colspan }}">{% endif -%}
+<div class="empty-state">
+  <div class="t">{{ title }}</div>
+  {%- if hint %}<div>{{ hint }}</div>{% endif %}
+</div>
+{%- if colspan %}</td></tr>{% endif -%}
+{%- endmacro -%}
+
+{%- macro empty_two(title, hint='', colspan=none) -%}
+{%- if colspan %}<tr><td colspan="{{ colspan }}">{% endif -%}
+<div class="empty-two"><strong>{{ title }}</strong>{% if hint %}<span>{{ hint }}</span>{% endif %}</div>
+{%- if colspan %}</td></tr>{% endif -%}
+{%- endmacro -%}
+
+{%- macro empty_inline(text, colspan=none) -%}
+{%- if colspan %}<tr><td colspan="{{ colspan }}" class="empty-inline">{{ text }}</td></tr>
+{%- else %}<div class="empty-inline">{{ text }}</div>{% endif -%}
+{%- endmacro -%}
+
+
+{# =========================================================================
+   10. NOTICES, PROGRESS, SPARKLINE, SEARCH BOX
+   ========================================================================= #}
+{%- macro notice(text, kind='') -%}<div class="notice{{ ' ' ~ kind if kind }}">{{ text }}</div>{%- endmacro -%}
+
+{%- macro queue_hint(text) -%}<div class="queue-hint">{{ icon('info', 15) }}<span>{{ text }}</span></div>{%- endmacro -%}
+
+{#- Segmented progress bar. done/proc/fail are percentages of the whole. -#}
+{%- macro progress(done=0, proc=0, fail=0, text='', state='running') -%}
+<div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ done|round|int }}" data-state="{{ state }}">
+  <div class="progress-track">
+    <span class="progress-seg done" style="width:{{ done }}%"></span>
+    <span class="progress-seg proc" style="width:{{ proc }}%"></span>
+    <span class="progress-seg fail" style="width:{{ fail }}%"></span>
+  </div>
+  {%- if text %}<div class="progress-text">{{ text }}</div>{% endif %}
+</div>
+{%- endmacro -%}
+
+{#- points: "0,20 12,15.4 ..." built server-side. up=true paints it green. -#}
+{%- macro spark(points, width=72, height=26, up=true, end_y=none) -%}
+{%- set stroke = 'var(--green,#3ddc84)' if up else 'var(--red,#ff6b6b)' -%}
+<svg class="spark" width="{{ width }}" height="{{ height }}" viewBox="0 0 {{ width }} {{ height }}" preserveAspectRatio="none" aria-hidden="true">
+  <polyline points="{{ points }}" fill="none" stroke="{{ stroke }}" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+  {%- if end_y is not none %}<circle cx="{{ width }}" cy="{{ end_y }}" r="2.3" fill="{{ stroke }}"/>{% endif %}
+</svg>
+{%- endmacro -%}
+
+{%- macro search_box(name='q', value='', placeholder='Search', id=none) -%}
+<div class="search-box">
+  <input type="search" name="{{ name }}" value="{{ value }}" placeholder="{{ placeholder }}"{% if id %} id="{{ id }}"{% endif %}
+         data-searchable-input>
+</div>
+{%- endmacro -%}
+
+{%- macro toolbar() -%}<div class="toolbar-row">{{ caller() }}</div>{%- endmacro -%}
+
+
+{# =========================================================================
+   11. DRAWER / MODAL SHELLS
+   One drawer per screen, mounted once. static/app.js fills #drawer-body with
+   a server-rendered fragment — no screen ever builds ad markup in JS.
+   ========================================================================= #}
+{%- macro drawer_mount(label='Details') -%}
+<div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+<aside class="drawer" id="drawer" hidden aria-label="{{ label }}" tabindex="-1">
+  <button type="button" class="drawer-close" id="drawer-close" aria-label="Close">{{ icon('close', 15) }}</button>
+  <div class="drawer-body" id="drawer-body"></div>
+</aside>
+{%- endmacro -%}
+
+{%- macro drawer_head(title, meta='', kicker='', name_for_avatar=none, stats=none) -%}
+<header class="drawer-head">
+  {%- if kicker %}<div class="drawer-kicker">{{ kicker }}</div>{% endif %}
+  <div class="drawer-pagehead">
+    {%- if name_for_avatar %}{{ avatar(name_for_avatar) }}{% endif %}
+    <div>
+      <div class="nm">{{ title }}</div>
+      {%- if meta %}<div class="mt">{{ meta }}</div>{% endif %}
+    </div>
+  </div>
+  {%- if stats %}<div class="drawer-statgrid{{ ' four' if stats|length == 4 }}">
+    {%- for stat in stats %}{{ dstat(stat.value, stat.label) }}{% endfor %}
+  </div>{% endif %}
+</header>
+{%- endmacro -%}
+
+{%- macro drawer_block(title=none) -%}
+<section class="drawer-block">{% if title %}<h3>{{ title }}</h3>{% endif %}{{ caller() }}</section>
+{%- endmacro -%}
+
+{%- macro modal(id, title, foot=none, wide=false) -%}
+<div class="modal-overlay" id="{{ id }}-overlay" data-modal-overlay="{{ id }}">
+  <div class="modal{{ ' wide' if wide }}" role="dialog" aria-modal="true" aria-label="{{ title }}">
+    <div class="modal-head">
+      <h3>{{ title }}</h3>
+      <button type="button" class="drawer-close" style="position:static" data-modal-close="{{ id }}" aria-label="Close">{{ icon('close', 15) }}</button>
+    </div>
+    <div class="modal-body">{{ caller() }}</div>
+    {%- if foot %}<div class="modal-foot">{{ foot }}</div>{% endif %}
+  </div>
+</div>
+{%- endmacro -%}
+
+
+{# =========================================================================
+   12. KANBAN (Test Queue) + SETTINGS ROWS
+   ========================================================================= #}
+{%- macro kcol(status, label, count=0) -%}
+<div class="kcol" data-status="{{ status }}">
+  <div class="kcol-head"><span class="dot"></span>{{ label }}<span class="kct">{{ count }}</span></div>
+  <div class="kcol-body">{{ caller() }}</div>
+</div>
+{%- endmacro -%}
+
+{%- macro settings_rail(items, current) -%}
+<nav class="settings-rail">
+  {%- for key, label, href, ic in items %}
+  <a class="{{ 'active' if key == current }}" href="{{ href }}">{{ icon(ic, 15) }}{{ label }}</a>
+  {%- endfor %}
+</nav>
+{%- endmacro -%}
+
+{%- macro setting_row(title, desc='') -%}
+<div class="setting-row">
+  <div class="setting-copy"><strong>{{ title }}</strong>{% if desc %}<span>{{ desc }}</span>{% endif %}</div>
+  <div class="btn-row">{{ caller() }}</div>
+</div>
+{%- endmacro -%}
+
+{%- macro pref_switch(on=false, name='', label='') -%}
+<button type="button" class="pref-switch{{ ' on' if on }}" role="switch" aria-checked="{{ 'true' if on else 'false' }}"
+        {% if name %}data-pref="{{ name }}"{% endif %} aria-label="{{ label }}"></button>
+{%- endmacro -%}
+
+{%- macro theme_choice(value, title, desc, active=false) -%}
+<button type="button" class="theme-choice{{ ' active' if active }}" data-theme-choice="{{ value }}">
+  <div class="theme-preview {{ 'dark' if value == 'black' else 'light' }}">
+    <div class="tp-side"></div>
+    <div class="tp-main"><div class="tp-top"></div><div class="tp-card"></div></div>
+  </div>
+  <div class="tc-label">
+    <div><strong>{{ title }}</strong><span>{{ desc }}</span></div>
+    <span class="theme-radio"></span>
+  </div>
+</button>
+{%- endmacro -%}
+
+
+{# =========================================================================
+   13. NAVIGATION CONTRACT
+   v1's sidebar, verbatim: services/web.py:157-172. Same order, same section
+   labels, same keys, so a screen sets active_nav to v1's key and lights up.
+
+   Each item is (key, label, href, icon, fallback_href).
+   base.html links the first of (href, fallback_href) that route_exists();
+   an item with neither registered renders inert instead of 404-ing.
+   `/page-analyzer` is v1's name for what v2 currently serves at `/pages`.
+   ========================================================================= #}
+{%- set NAV_SECTIONS = [
+  ('Research', [
+    ('overview',    'Overview',         '/overview',         'overview',    none),
+    ('alerts',      'Alerts',           '/alerts',           'alerts',      none),
+    ('session',     'Sessions',         '/sessions',         'session',     none),
+    ('keyword',     'Keyword Research', '/keyword-research', 'keyword',     none),
+    ('pages',       'Page Analyzer',    '/page-analyzer',    'pages',       '/pages'),
+    ('product',     'Products',         '/products',         'product',     none),
+    ('brand_group', 'Brand Groups',     '/brand-groups',     'brand_group', none)
+  ]),
+  ('Decision Pipeline', [
+    ('winners',    'Winners',    '/winners',    'winners',    none),
+    ('test_queue', 'Test Queue', '/test-queue', 'test_queue', none)
+  ]),
+  ('Self-Space', [
+    ('settings', 'Settings', '/settings', 'settings', none),
+    ('queue',    'Queue',    '/queue',    'queue',    none),
+    ('logs',     'Logs',     '/logs',     'report',   none)
+  ])
+] -%}
+
+{#- v1's page title + sub-line for each screen, verbatim. A screen that sets
+    neither `title` nor `subtitle` gets these from its active_nav key. -#}
+{%- set PAGE_META = {
+  'overview':    ('Overview',        'Aggregated intelligence across researched pages and keywords'),
+  'alerts':      ('Scaling Alerts',  'Pages and products that just started scaling across your tracked data'),
+  'session':     ('Sessions',        'Create extraction boundaries and watch accepted server data arrive'),
+  'keyword':     ('Keyword Research','Saved searches, queue and results'),
+  'pages':       ('Page Analyzer',   'Canonical page, ad and creative breakdowns'),
+  'product':     ('Products',        'Product intelligence using the original Meta ad start date'),
+  'brand_group': ('Brand Groups',    ''),
+  'winners':     ('Winners',         'Products ranked from current advertising evidence'),
+  'test_queue':  ('Test Queue',      'From winning research to live test, tracked'),
+  'settings':    ('Settings',        ''),
+  'queue':       ('Queue',           'Research, page analysis and tracked pages'),
+  'logs':        ('Logs',            'Bugs and failures this tool has seen, kept across restarts')
+} -%}

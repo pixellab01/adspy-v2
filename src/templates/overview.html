@@ -1,0 +1,284 @@
+{% import "_macros.html" as ui %}
+{% extends "base.html" %}
+
+{#- Overview — v1's landing screen, block for block.
+
+    v1: tabs/overview/ui.py:render(). Top to bottom it is the filter tray, the
+    four KPI tiles, the pinned strip, "Top Performing Pages", then "Top Products
+    by Ad Volume" beside "Recent Research", with the "Names" queue swapped in
+    when that filter is chosen. Same order here, same labels, same columns.
+
+    THE LOCAL MACROS BELOW are the v1 elements that static/app.css styles but
+    _macros.html does not (yet) wrap: the favourite star as a *form* (the shared
+    fav_star is type="button", which cannot submit), the live-ad count, the
+    trend badge, the product chip, the pinned card and the product bar. They
+    emit only classes app.css already defines — nothing new, and no <style>. -#}
+
+
+{%- macro fav_form(page) -%}
+  {#- display:contents so the button lays out as if the form were not there:
+      inside .page-cell (flex) and inside .pc-star (absolute) alike. -#}
+  <form method="post" action="{{ url_for('overview.toggle_favorite', page_id=page.page_id) }}" style="display:contents">
+    <input type="hidden" name="next" value="{{ request.full_path }}">
+    <button class="fav-star{{ ' on' if page.is_favorite }}" type="submit"
+            aria-pressed="{{ 'true' if page.is_favorite else 'false' }}"
+            title="{{ 'Unpin from favorites' if page.is_favorite else 'Pin to favorites' }}"
+            aria-label="{{ 'Unpin' if page.is_favorite else 'Pin' }} {{ page.display_name }}">{{ ui.star_icon(page.is_favorite) }}</button>
+  </form>
+{%- endmacro -%}
+
+{%- macro live_count(value) -%}
+  <span class="adcount adcount-live"><span class="live-dot"></span>{{ '{:,}'.format(value or 0) }}</span>
+{%- endmacro -%}
+
+{%- macro trend_badge(growth) -%}
+  {%- set amount = growth or 0 -%}
+  <span class="{{ 'trend-up' if amount >= 0 else 'trend-down' }}">{{ '+' if amount >= 0 else '-' }} {{ '{:.0f}'.format(amount|abs) }}%</span>
+{%- endmacro -%}
+
+{#- v1 shows the change against the previous FB-results reading, and this exact
+    neutral dash when a page has no earlier reading to compare with. v2 records
+    those readings in page_scan_history; until a scan writes a second one, every
+    page is in v1's no-history branch. -#}
+{%- macro result_change(text='-', tone='neutral') -%}
+  <span class="result-change {{ tone }}">{{ text }}</span>
+{%- endmacro -%}
+
+{#- v2's product names are the normalised extraction ("bifocal colored adaptive
+    power reading glasses buy1 get 3 free 4bcorg3"), where v1's came from a
+    short curated label. Untruncated they push the 7d Trend column — the point
+    of the table — off a 1440px screen, so the chip shows the head and the full
+    name stays in the tooltip. -#}
+{%- macro prod_chip(name, product_id) -%}
+  {%- if not name -%}{{ ui.chip('-', 'prod') }}
+  {%- elif route_exists('/products') -%}
+    <a class="chip prod" href="/products?product_id={{ product_id }}&amp;q={{ name|urlencode }}" title="{{ name }} - open in Products">{{ name|truncate(34, true, '…') }}</a>
+  {%- else -%}
+    <span class="chip prod" title="{{ name }}">{{ name|truncate(34, true, '…') }}</span>
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro pin_card(page) -%}
+  {%- set moved = page.today_delta or 0 -%}
+  <article class="pin-card">
+    <div class="pc-star">{{ fav_form(page) }}</div>
+    <div class="pc-top">
+      {{ ui.avatar(page.display_name) }}
+      <div>
+        <div class="pc-name">{{ page.display_name }}</div>
+        <div class="pc-cat">{{ page.group_name or 'Uncategorised' }}</div>
+      </div>
+    </div>
+    <div class="pc-ads">{{ '{:,}'.format(page.active_ads) }}<span> live ads</span></div>
+    <div class="pc-results"><strong>{{ page.meta_results_text }}</strong><span> Meta results</span></div>
+    <div class="pc-foot">
+      {{ trend_badge(page.seven_day_growth) }}
+      {{ ui.spark(page.trend_points, up=page.trend_up, end_y=page.trend_end_y) }}
+    </div>
+    <div class="pc-meta">
+      {{ '{:,}'.format(page.represented_ads) }} represented -
+      {%- if moved > 0 %} +{{ moved }} live today
+      {%- elif moved < 0 %} {{ moved }} live today
+      {%- else %} no live-ad change{% endif %}
+      {%- if page.group_name %} - {{ page.group_name }}{% endif %}
+    </div>
+  </article>
+{%- endmacro -%}
+
+{%- macro prod_bar(product) -%}
+  {%- set body -%}
+    <span class="pname"><span class="prod-rank">#{{ product.rank_position }}</span><span class="prod-title">{{ product.product_name }}{% if product.store_domain %}<small>{{ product.store_domain }}</small>{% endif %}</span></span>
+    <span class="prod-track"><span class="prod-fill" style="width:{{ product.bar_width }}%"><span class="pv">{{ '{:,}'.format(product.active_unique_ads) }}</span></span></span>
+    <span class="ppages">{{ '{:,}'.format(product.advertiser_count) }} {{ 'page' if product.advertiser_count == 1 else 'pages' }} - {{ '{:,}'.format(product.represented_ads) }} represented</span>
+  {%- endset -%}
+  {%- if route_exists('/products') -%}
+    <a class="prod-bar" href="/products?product_id={{ product.product_id }}" title="Open {{ product.product_name }} in Products">{{ body }}</a>
+  {%- else -%}
+    <div class="prod-bar">{{ body }}</div>
+  {%- endif -%}
+{%- endmacro -%}
+
+
+{% block content %}
+
+{#- 1. THE FILTER TRAY — v1's four, in v1's order, with the Names count pill.
+     Links rather than JS toggles: a filtered Overview is a URL, and the screen
+     still works with scripting off. -#}
+{% set view_items = [
+     ('all',       'All',       url_for('overview.index')),
+     ('favorites', 'Favorites', url_for('overview.index', view='favorites')),
+     ('scaling',   'Scaling',   url_for('overview.index', view='scaling')),
+     ('names',     'Names',     url_for('overview.index', view='names'), unresolved_count)
+   ] %}
+{% call ui.section_toolbar() %}
+  {{ ui.filter_group(view_items, view, aria='Overview sections') }}
+  <span class="result-count">{{ (unresolved_pages if view == 'names' else top_pages)|length }} pages shown</span>
+{% endcall %}
+
+
+{% if view != 'names' %}
+
+  {#- 2. KPI TILES — the four marks are v1's: P, A, R, ! -#}
+  {% call ui.kpi_grid() %}
+    {{ ui.kpi('Pages Tracked', '{:,}'.format(kpis.pages_tracked), mark='P',
+              delta=('+' if kpis.new_pages_week > 0 else '') ~ kpis.new_pages_week,
+              delta_label='new this week', direction=kpis.new_pages_direction) }}
+
+    {{ ui.kpi('Active Unique Ads', '{:,}'.format(kpis.active_unique_ads), mark='A',
+              delta=('+' if kpis.change_since_previous_scan > 0 else '') ~ '{:.1f}'.format(kpis.change_since_previous_scan) ~ '%',
+              delta_label='vs previous scan', direction=kpis.change_direction) }}
+
+    {{ ui.kpi('Represented Ads', '{:,}'.format(kpis.represented_ads), mark='R',
+              delta_label=('{:,}'.format(kpis.creative_families) ~ ' creative families') if kpis.creative_families_available else '') }}
+
+    {{ ui.kpi('Scaling Alerts', '{:,}'.format(kpis.scaling_alerts), mark='!',
+              value_color='var(--red)',
+              delta='{:,}'.format(kpis.brand_groups) ~ ' brand groups monitored',
+              direction='down') }}
+  {% endcall %}
+
+
+  {#- 3. PINNED PAGES -#}
+  <div class="pin-section-label">{{ ui.icon('star', 13) }} Pinned Pages</div>
+  <div class="pin-strip"
+       data-poll-probe="{{ url_for('queue.queue_rows_fragment', status='open') }}"
+       data-poll-page=".kpi-grid, .pin-strip, .tbl tbody, .prod-bars">
+    {% for page in pinned %}{{ pin_card(page) }}
+    {% else %}<div class="pin-empty">No pinned pages. Use the star on any row below.</div>{% endfor %}
+  </div>
+
+
+  {#- 4. TOP PERFORMING PAGES -#}
+  {% set top_actions %}
+    {{ ui.live_badge('Live') }}
+    {{ ui.btn('Rebuild', href=url_for('overview.index', view=view if view != 'all' else none),
+              kind='ghost', size='sm',
+              title='Every number here is counted live — this just re-reads the database.') }}
+    {{ ui.btn('Export CSV', href=url_for('overview.export_csv', view=view if view != 'all' else none),
+              kind='ghost', size='sm') }}
+  {% endset %}
+
+  {{ ui.panel_open('Top Performing Pages', actions=top_actions, scroll=true) }}
+    <table class="tbl">
+      {{ ui.thead([('', 'tight'), ('Page',), ('Live Ads', 'num'), ('Top Product', 'hide-md'),
+                   ('Meta Results', 'num'), ('Oldest Ad', 'num hide-md'), ('7d Trend', 'num')]) }}
+      <tbody>
+        {% for page in top_pages %}
+          {%- set badges %}
+            {%- if page.has_alias %}{{ ui.micro_badge('Manual alias') }}{% endif %}
+            {%- if page.group_name %}{{ ui.grp_badge(page.group_name) }}{% endif %}
+          {% endset -%}
+          {%- set meta_line = 'ID ' ~ (page.platform_page_id or page.page_id)
+                ~ ' - ' ~ '{:,}'.format(page.represented_ads) ~ ' represented'
+                ~ (' - ' ~ page.oldest_days ~ 'd' if page.oldest_days is not none else '') -%}
+          <tr data-searchable data-search-text="{{ page.display_name }} {{ page.platform_page_id }} {{ page.group_name or '' }} {{ page.top_product or '' }}">
+            <td class="rank{{ ' top' if page.rank_position <= 3 }}">{{ '%02d'|format(page.rank_position) }}</td>
+            <td>{{ ui.page_cell(page.display_name,
+                                meta=meta_line,
+                                href=url_for('pages.detail', page_id=page.page_id),
+                                badges=badges,
+                                lead=fav_form(page)) }}</td>
+            <td class="num">{{ live_count(page.active_ads) }}</td>
+            <td class="hide-md">{{ prod_chip(page.top_product, page.top_product_id) }}</td>
+            <td class="num"><strong>{{ page.meta_results_text }}</strong> {{ result_change() }}</td>
+            <td class="num hide-md">{{ ui.days_pill(page.oldest_days) }}</td>
+            <td class="num">
+              <div class="trend-wrap">
+                {{ ui.spark(page.trend_points, up=page.trend_up, end_y=page.trend_end_y) }}
+                {{ trend_badge(page.seven_day_growth) }}
+              </div>
+            </td>
+          </tr>
+        {% else %}
+          {% if view == 'favorites' %}
+            {{ ui.empty_state('No pinned pages yet', 'Star a page on the All tab and it lands here.', colspan=7) }}
+          {% elif view == 'scaling' %}
+            {{ ui.empty_state('Nothing is scaling right now', 'A page needs +20% active ads over seven days to show up here.', colspan=7) }}
+          {% else %}
+            {{ ui.empty_state('No page metrics yet', colspan=7) }}
+          {% endif %}
+        {% endfor %}
+      </tbody>
+    </table>
+  {{ ui.panel_close() }}
+
+
+  {#- 5. TOP PRODUCTS  +  RECENT RESEARCH, side by side as in v1 -#}
+  <div class="row-2">
+    {{ ui.panel_open('Top Products by Ad Volume') }}
+      {% if top_products %}
+        <div class="prod-bars">
+          {% for product in top_products %}{{ prod_bar(product) }}{% endfor %}
+        </div>
+      {% else %}
+        {{ ui.empty_state('No product data yet', 'Products appear after ad classification is available.') }}
+      {% endif %}
+    {{ ui.panel_close() }}
+
+    {{ ui.panel_open('Recent Research', scroll=true) }}
+      <table class="tbl">
+        {{ ui.thead([('Keyword',), ('Pages', 'num'), ('Ads', 'num'), ('Status',)]) }}
+        <tbody>
+          {% for run in recent %}
+            <tr data-searchable data-search-text="{{ run.keyword }} {{ run.country }} {{ run.status }}">
+              <td>
+                <div class="page-name">{{ run.keyword }}</div>
+                <div class="page-meta">{{ run.country or 'All countries' }} - {{ run.requested_at or 'Never' }}</div>
+              </td>
+              <td class="num">{{ '{:,}'.format(run.unique_pages or 0) }}</td>
+              <td class="num">{{ '{:,}'.format(run.ads_scanned or 0) }}</td>
+              <td>{{ ui.status_pill(run.status or 'unknown') }}</td>
+            </tr>
+          {% else %}
+            {{ ui.empty_state('No keyword research yet', colspan=4) }}
+          {% endfor %}
+        </tbody>
+      </table>
+    {{ ui.panel_close() }}
+  </div>
+
+{% else %}
+
+  {#- 6. NAMES — v1's "Page IDs needing names".
+
+       v1 hands each row to Gemini (three models, rotating keys) and writes the
+       answer back as an alias. v2 has no LLM and none is coming, so the row
+       carries the same outcome as a one-field form, posted to the alias
+       endpoint the Page Analyzer already owns. Same screen, same place. -#}
+  {% set names_title %}Page IDs needing names <span class="count-pill">{{ unresolved_count }}</span>{% endset %}
+  {{ ui.panel_open(names_title,
+        desc='Only numeric and generic identities are shown. Pages that already carry a name of their own are excluded.',
+        scroll=true) }}
+    <table class="tbl">
+      {{ ui.thead([('Page',), ('Why', 'hide-md'), ('Stored ads', 'num'), ('Live', 'num'), ('Name it',)]) }}
+      <tbody>
+        {% for page in unresolved_pages %}
+          <tr data-searchable data-search-text="{{ page.display_name }} {{ page.platform_page_id }} {{ page.reason }}">
+            <td>{{ ui.page_cell(page.display_name,
+                                meta='Page ID ' ~ (page.platform_page_id or page.page_id),
+                                href=url_for('pages.detail', page_id=page.page_id)) }}</td>
+            <td class="hide-md">{{ ui.tag(page.reason) }}</td>
+            <td class="num">{{ '{:,}'.format(page.stored_ads) }}</td>
+            <td class="num">{{ live_count(page.active_ads) }}</td>
+            <td>
+              <form class="inline-form" method="post" action="{{ url_for('pages.set_alias', page_id=page.page_id) }}">
+                <input type="hidden" name="next" value="{{ url_for('overview.index', view='names') }}">
+                <input type="text" name="alias" size="18" placeholder="Real brand name" autocomplete="off" required>
+                {{ ui.btn('Save', kind='primary', size='sm') }}
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          {{ ui.empty_state('Every numeric or generic Page ID already has a usable name.', colspan=5) }}
+        {% endfor %}
+      </tbody>
+    </table>
+  {{ ui.panel_close() }}
+
+  {% if unresolved_count > unresolved_pages|length %}
+    {{ ui.notice('Showing the busiest ' ~ unresolved_pages|length ~ ' of ' ~ unresolved_count ~ ' pages that still need a name.') }}
+  {% endif %}
+
+{% endif %}
+
+{% endblock %}

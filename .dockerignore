@@ -1,0 +1,18 @@
+# Build context me ye sab mat bhejo.
+.git/
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+*.env
+
+# src/ ke andar ke dev leftovers (agar package folder se copy karte waqt aa gaye hon)
+src/.venv/
+src/data/
+src/logs/
+src/tests/
+src/docs/
+src/__pycache__/

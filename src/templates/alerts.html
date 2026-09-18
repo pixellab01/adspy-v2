@@ -1,0 +1,140 @@
+{% import "_macros.html" as ui %}
+{% extends "base.html" %}
+
+{#- Scaling Alerts — v1's tabs/alerts/ui.py, rebuilt on the shared macros.
+
+    v1's shape, kept:
+      * one toolbar: filter pills with counts (All / Unread / Scaling /
+        New hot / Product surge), then the sweep note, then "Mark all read"
+        and the amber "Run sweep now" on the right;
+      * a two-column grid — the alert feed left, "Alert settings" right at
+        330px, collapsing to one column on a narrow window;
+      * the feed rows carry severity, the message, the type tag and the age,
+        with "Mark read" on the right of an unread row;
+      * the settings card lists v1's six thresholds in v1's order with v1's
+        labels, then the enable switch, then the note with the last sweep.
+
+    v1's row was a flex block styled by 60 lines of its own <style>. v2 has one
+    stylesheet and no per-screen CSS, so the same five fields are a `tbl` row:
+    severity, alert, type, age, action — same information, same order.
+
+    Changed on purpose: no Telegram fields (decision #6 removed delivery), no
+    admin lock on the settings card (there are no users), and a fourth type,
+    "Stopped", appended after v1's three so nothing of v1's moved. -#}
+
+{% block title %}Scaling Alerts - Pixellab Ad Spy{% endblock %}
+{% block heading %}Scaling Alerts{% endblock %}
+
+{% block content %}
+
+{#- v1's toolbar order: All, Unread, Scaling, New hot, Product surge — each
+    with its live count. "Stopped" is appended after them. -#}
+{%- set filter_items = [] -%}
+{%- for key, label in filters -%}
+  {%- set _ = filter_items.append((
+        key, label,
+        url_for('alerts.index', filter=(none if key == 'unread_first' else key)),
+        filter_counts.get(key, 0))) -%}
+{%- endfor %}
+
+{#- v1's single toolbar row, left to right: the filter pills, the sweep note
+    pushed to the right by result-count's auto margin, then "Mark all read" and
+    the amber "Run sweep now". -#}
+<section class="section-toolbar">
+  {{ ui.filter_group(filter_items, current_filter, aria='Alert filters') }}
+  <span class="result-count">{{ alerts | length }} shown / {{ counts.unread }} unread</span>
+  <form method="post" action="{{ url_for('alerts.mark_all_read') }}">
+    <input type="hidden" name="next" value="{{ request.full_path }}">
+    <button class="btn" type="submit">Mark all read</button>
+  </form>
+  <form method="post" action="{{ url_for('alerts.sweep_now') }}">
+    <input type="hidden" name="next" value="{{ request.full_path }}">
+    <button class="btn primary" type="submit">Run sweep now</button>
+  </form>
+</section>
+
+{{ ui.queue_hint('Sweeps run when you open this screen, at most once every ' ~ cooldown_minutes ~ ' minutes. "Run sweep now" ignores that wait.') }}
+
+{#- v1's grid is `minmax(0,1fr) 330px`, collapsing to one column under 1080px
+    via a media query in its own <style> block. v2 has no per-screen CSS and
+    app.css owns no such breakpoint, so the same two-up-then-stack behaviour is
+    a wrapping flex row instead: the settings card holds 330px and drops under
+    the feed once the feed can no longer keep 520px. Same result, no new rule. -#}
+<div class="btn-row" style="align-items:stretch;gap:12px;margin-top:14px">
+
+  {{ ui.panel_open('Alerts', desc=counts.total ~ ' total - ' ~ counts.unread ~ ' unread',
+                   attrs={'style': 'flex:1 1 520px;min-width:0'}) }}
+    <div class="table-wrap">
+      <table class="tbl">
+        {{ ui.thead([('Sev', 'tight'), ('Alert',), ('Type',), ('When',), ('', 'tight')]) }}
+        <tbody>
+          {% for alert in alerts %}
+            <tr data-searchable data-search-text="{{ alert.message }} {{ alert.type_label }} {{ alert.entity_name }}">
+              <td class="tight">
+                {{ ui.badge(alert.severity, 'failed' if alert.severity == 'high' else ('pending' if alert.severity == 'warn' else 'running')) }}
+              </td>
+              <td class="wrap">
+                {{ alert.message }}
+                {%- if alert.entity_type == 'page' %}
+                  <a class="linklike" href="{{ url_for('pages.detail', page_id=alert.entity_id) }}">open page</a>
+                {%- elif alert.entity_type == 'product' and route_exists('/products') %}
+                  <a class="linklike" href="/products?q={{ alert.entity_name | urlencode }}">open product</a>
+                {%- endif %}
+                {%- if alert.is_unread %}{{ ui.micro_badge('new') }}{% endif %}
+              </td>
+              <td>{{ ui.tag(alert.type_label) }}</td>
+              <td class="muted nowrap" title="{{ alert.generated_at }}">{{ alert.when }}</td>
+              <td class="tight">
+                {% if alert.is_unread %}
+                  <form method="post" action="{{ url_for('alerts.mark_read', alert_id=alert.id) }}">
+                    <input type="hidden" name="next" value="{{ request.full_path }}">
+                    <button class="btn sm ghost" type="submit">Mark read</button>
+                  </form>
+                {% endif %}
+              </td>
+            </tr>
+          {% else %}
+            {{ ui.empty_state(
+                 'No alerts here yet.',
+                 'New scaling activity will appear automatically. If this stays empty, loosen the thresholds on the right.',
+                 colspan=5) }}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {{ ui.panel_close() }}
+
+  {{ ui.panel_open('Alert settings', pad=true,
+                   attrs={'style': 'flex:0 1 330px;min-width:300px;align-self:flex-start'}) }}
+    <form method="post" action="{{ url_for('alerts.update_settings') }}">
+      <input type="hidden" name="next" value="{{ request.full_path }}">
+      <div class="row-2">
+        {% for key, label, low, high in setting_fields %}
+          <div class="field">
+            <label for="al-{{ key }}">{{ label }}</label>
+            <input class="input-lg input-sm" id="al-{{ key }}" type="number" name="{{ key }}"
+                   min="{{ low }}" max="{{ high }}"
+                   step="{{ '0.5' if key == 'scaling_threshold_pct' else '1' }}"
+                   value="{{ settings[key] }}">
+          </div>
+        {% endfor %}
+      </div>
+      <label class="check" style="margin:4px 0 14px">
+        <input type="checkbox" name="alerts_enabled" value="1" {{ 'checked' if settings.alerts_enabled }}>
+        Alerts enabled
+      </label>
+      <p class="muted small">
+        Thresholds decide what counts as news. A page is "scaling" when it adds at least
+        <strong>{{ settings.scaling_threshold_abs }}</strong> ads <em>and</em> grows by
+        <strong>{{ settings.scaling_threshold_pct }}%</strong> since the previous scan; the same two
+        numbers, mirrored, raise a "Stopped" alert. Last sweep: {{ last_sweep }}.
+      </p>
+      <div class="btn-row">
+        <button class="btn primary" type="submit">Save settings</button>
+      </div>
+    </form>
+  {{ ui.panel_close() }}
+
+</div>
+
+{% endblock %}

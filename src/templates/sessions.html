@@ -1,0 +1,214 @@
+{#- Sessions — v1's tabs/session/ui.py, block for block.
+
+    Order down the page is v1's: the Start/Complete controls, then the active
+    session card with its four KPIs, then "Live scrape activity" beside
+    "Recently touched pages", then "Session history".
+
+    Renders twice over, exactly like queue.html: as a full page, and — when
+    `fragment == 'live'` — as just the live region, which the 5s poll at the
+    bottom swaps in. Same macros both times, so the live view can never drift
+    from the first paint and no session markup exists outside this file. -#}
+{% import "_macros.html" as ui %}
+
+{% macro session_kpis(s) %}
+  {{ ui.kpi('Pages stored', '{:,}'.format(s.pages_stored or 0), mark='P',
+            delta_label='{:,} touched in 15m'.format(s.pages_last_15m or 0)) }}
+  {{ ui.kpi('Distinct ads', '{:,}'.format(s.ads_stored or 0), mark='A',
+            delta_label='{:,} accepted in 15m'.format(s.ads_last_15m or 0)) }}
+  {{ ui.kpi('Represented', '{:,}'.format(s.represented_ads or 0), mark='R',
+            delta_label='session page snapshots') }}
+  {{ ui.kpi('Server ingests', '{:,}'.format(s.ingest_events or 0), mark='I',
+            delta_label='accepted batches') }}
+{% endmacro %}
+
+{% macro active_card(s) %}
+  {% set head %}{{ ui.live_badge(s.activity_text if s else 'No data yet',
+                                 stale=(not s or s.activity_tone == 'idle'),
+                                 busy=(s and s.activity_tone == 'warm')) }}{% endset %}
+  {{ ui.panel_open(s.name if s else 'No active session',
+                   desc=(s.keyword or 'Keyword will be learned from the first scrape')
+                        if s else 'Create one below. If data arrives first, the server safely creates the next session automatically.',
+                   actions=head, pad=true) }}
+    {% if s %}
+      <div class="page-meta mono">Started {{ s.started_at }} - Last accepted data {{ s.last_activity_at or 'never' }}</div>
+      <div style="height:14px"></div>
+      <div class="kpi-grid" style="margin-bottom:0">{{ session_kpis(s) }}</div>
+    {% else %}
+      {{ ui.empty_inline('No session has been started yet.') }}
+    {% endif %}
+  {{ ui.panel_close() }}
+{% endmacro %}
+
+{% macro events_table(rows) %}
+  <div class="table-wrap">
+    <table class="tbl">
+      {{ ui.thead([('Accepted server ingest',), ('Received',),
+                   ('Pages', 'num'), ('Ads', 'num'), ('State',)]) }}
+      <tbody>
+        {% for event in rows %}
+          <tr data-searchable data-search-text="{{ event.page_summary }} {{ event.search_type }}">
+            {#- v1's second line: "<search type> · <source>". The batch id lives in
+                the row's title, where it is there when you need it and out of the
+                way when you do not. -#}
+            <td>{{ ui.page_cell(event.page_summary or 'Accepted server ingest',
+                                meta=event.search_type|title ~ ' - ' ~ event.source,
+                                meta_title=event.batch_id or '') }}</td>
+            <td class="mono faint">{{ event.created_at }}</td>
+            <td class="num">{{ '{:,}'.format(event.page_count or 0) }}</td>
+            <td class="num">{{ '{:,}'.format(event.ads_processed or 0) }}</td>
+            <td>{{ ui.status_pill('completed' if event.snapshot_complete else 'running',
+                                  'Final' if event.snapshot_complete else 'Live') }}</td>
+          </tr>
+        {% else %}
+          {{ ui.empty_state('No accepted scrape batches have reached this session yet.',
+                            'Batches appear the moment the server accepts one.', colspan=5) }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endmacro %}
+
+{% macro pages_table(rows) %}
+  <div class="table-wrap">
+    <table class="tbl">
+      {{ ui.thead([('Page',), ('Live ads', 'num'), ('Represented', 'num'), ('Updates', 'num')]) }}
+      <tbody>
+        {% for page in rows %}
+          <tr data-searchable data-search-text="{{ page.display_name }} {{ page.platform_page_id }}">
+            <td>{{ ui.page_cell(page.display_name,
+                                meta='Meta ID ' ~ (page.platform_page_id or '-'),
+                                meta_title='last accepted data ' ~ (page.last_seen_at or 'never'),
+                                href=url_for('pages.detail', page_id=page.page_id)) }}</td>
+            <td class="num">{{ '{:,}'.format(page.live_ads or 0) }}</td>
+            <td class="num">{{ '{:,}'.format(page.represented_ads or 0) }}</td>
+            <td class="num muted">{{ '{:,}'.format(page.scrape_count or 0) }}</td>
+          </tr>
+        {% else %}
+          {{ ui.empty_state('Pages will appear here as soon as the server accepts their data.',
+                            colspan=4) }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endmacro %}
+
+{% macro history_table(rows, active_id) %}
+  <div class="table-wrap">
+    <table class="tbl">
+      {{ ui.thead([('Session',), ('Status',), ('Pages', 'num'), ('Ads', 'num'),
+                   ('Represented', 'num'), ('Started',)]) }}
+      <tbody>
+        {% for row in rows %}
+          <tr data-searchable data-search-text="{{ row.name }} {{ row.keyword }}">
+            <td>{{ ui.page_cell(row.name, meta=row.keyword or 'No keyword marked',
+                                href=url_for('sessions.index', session=row.id)) }}</td>
+            <td>{{ ui.status_pill('active' if row.status == 'active' else 'completed',
+                                  'Active' if row.status == 'active' else 'Complete') }}</td>
+            <td class="num">{{ '{:,}'.format(row.pages_stored or 0) }}</td>
+            <td class="num">{{ '{:,}'.format(row.ads_stored or 0) }}</td>
+            <td class="num">{{ '{:,}'.format(row.represented_ads or 0) }}</td>
+            <td class="mono faint">{{ row.started_at }}</td>
+          </tr>
+        {% else %}
+          {{ ui.empty_state('Session 1 is created automatically when the first accepted scrape reaches the server.',
+                            colspan=6) }}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endmacro %}
+
+{% macro live_region(active, display, events, pages, sessions) %}
+  {{ active_card(display) }}
+
+  <div style="display:grid;grid-template-columns:minmax(0,1.14fr) minmax(0,.86fr);gap:16px;align-items:start">
+    {% set auto %}{{ ui.live_badge('Auto-refresh 5s') }}{% endset %}
+    {{ ui.panel_open('Live scrape activity',
+                     desc='Compact server receipts from the extension-to-server transfer.',
+                     actions=auto) }}
+      {{ events_table(events) }}
+    {{ ui.panel_close() }}
+
+    {{ ui.panel_open('Recently touched pages',
+                     desc='Latest page snapshots linked to this session.') }}
+      {{ pages_table(pages) }}
+    {{ ui.panel_close() }}
+  </div>
+
+  {{ ui.panel_open('Session history',
+                   desc='Flat storage boundaries only. No nested runs or batch browsing.') }}
+    {{ history_table(sessions, active.id if active else none) }}
+  {{ ui.panel_close() }}
+{% endmacro %}
+
+
+{% if fragment == 'live' %}
+{{ live_region(active, display, events, pages, sessions) }}
+{% else %}
+{% extends "base.html" %}
+
+{% block heading %}Sessions{% endblock %}
+
+{% block actions %}
+  <form method="post" action="{{ url_for('sessions.complete') }}">
+    <input type="hidden" name="next" value="{{ request.full_path }}">
+    {#- v1 paints this one red (.session-complete), not amber: it ends the
+        boundary the incoming data is being counted against. -#}
+    <button class="btn danger" type="submit" {{ 'disabled' if not active }}>Complete active session</button>
+  </form>
+{% endblock %}
+
+{% block content %}
+
+{#- v1 opens with the control panel; so does this. There are no roles in v2,
+    so v1's "controls are available to administrators" branch is gone. -#}
+{{ ui.panel_open('Start Session ' ~ next_number,
+                 desc='Starting a new session completes the current one and creates the next storage boundary. Existing canonical ads are not duplicated.',
+                 pad=true) }}
+  <form class="toolbar-row" method="post" action="{{ url_for('sessions.start') }}">
+    <input type="hidden" name="next" value="{{ request.full_path }}">
+    <div class="field" style="flex:1 1 300px;margin:0">
+      <label for="session-keyword">Root keyword</label>
+      <input class="input-lg" id="session-keyword" type="text" name="keyword"
+             maxlength="240" placeholder="Root keyword, e.g. Naaptol" autocomplete="off">
+    </div>
+    <div class="field" style="flex:1 1 300px;margin:0">
+      <label for="session-notes">Note <span class="field-hint">(optional)</span></label>
+      <input class="input-lg" id="session-notes" type="text" name="notes"
+             maxlength="1000" placeholder="Optional internal note" autocomplete="off">
+    </div>
+    <button class="btn primary" type="submit" style="padding:13px 22px;align-self:flex-end">Start next session</button>
+  </form>
+{{ ui.panel_close() }}
+
+{% if display and not display.stored %}
+  {{ ui.queue_hint('This session reads its activity straight out of the job tables — every accepted batch received between its start and now.') }}
+  <div style="height:14px"></div>
+{% endif %}
+
+<div id="sessions-live" data-poll="{{ url_for('sessions.live_fragment', session=display.id if display else none) }}">
+  {{ live_region(active, display, events, pages, sessions) }}
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+{#- v1's "Auto-refresh 5s". static/app.js only polls #queue-rows, so the one
+    thing this screen adds is the same swap against its own fragment URL —
+    server-rendered HTML in, innerHTML out, no markup built in JS. -#}
+<script>
+  (function () {
+    var region = document.getElementById('sessions-live');
+    if (!region || !region.getAttribute('data-poll')) return;
+    var url = region.getAttribute('data-poll');
+    setInterval(function () {
+      if (document.hidden) return;
+      fetch(url, { headers: { 'X-Requested-With': 'fetch' } })
+        .then(function (response) { return response.text(); })
+        .then(function (html) { region.innerHTML = html; })
+        .catch(function () {});
+    }, 5000);
+  })();
+</script>
+{% endblock %}
+{% endif %}
