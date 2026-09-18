@@ -1069,12 +1069,13 @@ def stage2_scan(
 ) -> dict[str, Any]:
     """Accept -> Track -> Scan for these discovered pages.
 
-    Marks the pages tracked, then creates ONE page_scan job for them through
+    Marks the pages tracked, then creates page_scan jobs for them through
     ``app.routes.queue.create_scan_job`` (which delegates to
     ``job_service.create_job``), so the duplicate guard (PRD P0.2) and the
-    "no numeric Meta page id, no scan" filter both apply unchanged. Blocked
+    "no numeric Meta page id, no scan" filter both apply unchanged. One job
+    never covers more than the service's SCAN_JOB_MAX_PAGES pages. Blocked
     pages are dropped first. The review rows are then marked ``queued`` with
-    the job id (a page already queued by another live job is marked queued
+    their job id (a page already queued by another live job is marked queued
     against THAT job), and rows create_scan_job could not open become
     ``unscannable``.
 
@@ -1117,14 +1118,20 @@ def stage2_scan(
 
     with db.transaction():
         if queued_ids and result.get("job_id"):
-            db.execute(
-                f"""
-                UPDATE keyword_discovered_pages
-                   SET review_status = 'queued', scan_job_id = ?, reviewed_at = ?, updated_at = ?
-                 WHERE query_id = ? AND page_id IN ({_placeholders(queued_ids)})
-                """,
-                (int(result["job_id"]), now, now, query_id, *queued_ids),
-            )
+            page_job_ids = result.get("page_job_ids") or {}
+            by_job: dict[int, list[int]] = {}
+            for page_id in queued_ids:
+                jid = int(page_job_ids.get(page_id) or result["job_id"])
+                by_job.setdefault(jid, []).append(page_id)
+            for jid, pids in by_job.items():
+                db.execute(
+                    f"""
+                    UPDATE keyword_discovered_pages
+                       SET review_status = 'queued', scan_job_id = ?, reviewed_at = ?, updated_at = ?
+                     WHERE query_id = ? AND page_id IN ({_placeholders(pids)})
+                    """,
+                    (jid, now, now, query_id, *pids),
+                )
         if unscannable_ids:
             db.execute(
                 f"""

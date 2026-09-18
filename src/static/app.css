@@ -340,6 +340,9 @@ h1,h2,h3,h4{font-family:var(--display);font-weight:600}
 .trend-up,.delta-up{color:var(--green);font-family:var(--mono);font-size:11.5px;font-weight:600}
 .trend-down,.delta-down{color:var(--red);font-family:var(--mono);font-size:11.5px;font-weight:600}
 .trend-flat,.delta-flat{color:var(--text-faint);font-family:var(--mono);font-size:11.5px}
+/* Coverage colouring on the Queue screen: below 95% amber, below 90% red. */
+.cov-amber{color:var(--amber-bright);font-weight:600}
+.cov-red{color:var(--red);font-weight:600}
 .trend-wrap{display:inline-flex;align-items:center;gap:7px;justify-content:flex-end}
 .result-change{display:inline-flex;align-items:center;white-space:nowrap;font-family:var(--mono);font-size:9px;font-weight:750}
 .result-change.up{color:var(--green)}

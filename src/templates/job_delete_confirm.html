@@ -1,0 +1,41 @@
+{#- Delete-job confirmation: what the delete would remove, then one explicit
+    confirm. Rendered by queue.delete_job_confirm; the destructive call is
+    queue.delete_job_do. -#}
+{% extends "base.html" %}
+{% import "_macros.html" as ui %}
+
+{% block heading %}Delete job #{{ impact.job.id }}?{% endblock %}
+
+{% block actions %}
+  <a class="btn ghost" href="{{ next }}">Back to queue</a>
+{% endblock %}
+
+{% block content %}
+<div class="panel">
+  <div class="panel-body pad">
+    <h2 style="margin-top:0">{{ impact.job.label or impact.job.job_type }} <span class="faint">#{{ impact.job.id }}</span></h2>
+    <p class="muted">
+      Deleting removes the job, its {{ impact.targets }} target(s) and
+      {{ impact.batches }} batch(es). Ads are removed <strong>only</strong> when
+      this job is the sole job that ever captured them — ads a later scan
+      re-captured stay, because they are that scan's data too.
+    </p>
+    <table class="tbl">
+      <tbody>
+        <tr><td>Targets</td><td class="num">{{ impact.targets }}</td></tr>
+        <tr><td>Batches</td><td class="num">{{ impact.batches }}</td></tr>
+        <tr>
+          <td>Ads only this job captured <span class="faint">(will be deleted)</span></td>
+          <td class="num {{ 'delta-down' if impact.exclusive_ads else '' }}">{{ impact.exclusive_ads }}</td>
+        </tr>
+      </tbody>
+    </table>
+    <div style="height:16px"></div>
+    <form method="post" action="/queue/{{ impact.job.id }}/delete/confirm" style="display:flex;gap:10px">
+      <input type="hidden" name="next" value="{{ next }}">
+      <button class="btn danger" type="submit">Yes, delete job #{{ impact.job.id }}</button>
+      <a class="btn ghost" href="{{ next }}">Keep it</a>
+    </form>
+  </div>
+</div>
+{% endblock %}

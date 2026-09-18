@@ -279,7 +279,8 @@ def _names(pages: list, limit: int = 4) -> str:
 def _flash_job_result(result: dict) -> None:
     unscannable = result.get("unscannable") or []
     if result["job_id"]:
-        flash(f"Job #{result['job_id']} queued: {_names(result['queued'])}.", "success")
+        ids = ", ".join(f"#{i}" for i in result.get("job_ids") or [result["job_id"]])
+        flash(f"Job(s) {ids} queued: {_names(result['queued'])}.", "success")
     elif result["reason"] == "already_queued":
         flash("Those pages are already queued or running — not queuing them twice.", "warning")
     elif result["reason"] == "no_meta_page_id":

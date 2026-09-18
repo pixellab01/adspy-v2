@@ -91,8 +91,9 @@ def _flash_result(result: dict[str, Any]) -> None:
     reason = str(result.get("reason") or "")
 
     if result.get("jobId") and result.get("created"):
+        ids = ", ".join(f"#{i}" for i in result.get("jobIds") or [result["jobId"]])
         flash(
-            f"Job #{result['jobId']} queued: {len(queued)} page(s) running {name} — "
+            f"Job(s) {ids} queued: {len(queued)} page(s) running {name} — "
             f"{_names(queued)}.",
             "success",
         )
@@ -103,7 +104,16 @@ def _flash_result(result: dict[str, Any]) -> None:
             "warning",
         )
     elif reason == "already_queued":
-        flash(f"The pages running {name} are already queued or running.", "warning")
+        ids = result.get("jobIds") or []
+        if ids:
+            names = ", ".join(f"#{i}" for i in ids)
+            flash(
+                f"The pages running {name} are already covered by job(s) {names} — "
+                "not queuing them twice.",
+                "warning",
+            )
+        else:
+            flash(f"The pages running {name} are already queued or running.", "warning")
     elif reason == "no_meta_page_id":
         pass   # the sentence below says it better
     else:

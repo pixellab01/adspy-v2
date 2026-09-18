@@ -62,6 +62,15 @@ def service():
         return None
 
 
+def _scan_job_max_pages() -> int:
+    """One scan job's page cap, owned by ``app.job_service`` (falls back to 5)."""
+    module = service()
+    try:
+        return max(1, int(getattr(module, "SCAN_JOB_MAX_PAGES", 5)))
+    except (TypeError, ValueError):
+        return 5
+
+
 def _job_id_of(result: object) -> int | None:
     if isinstance(result, int):
         return result
@@ -93,10 +102,13 @@ def _delegate_create_job(page_ids: Sequence[int], label: str) -> tuple[int | Non
 
 
 def create_scan_job(page_ids: Sequence[int], label: str | None = None) -> dict:
-    """Queue a page_scan job for these pages, skipping already-queued ones.
+    """Queue page_scan jobs for these pages, skipping already-queued ones.
 
-    Returns ``{job_id, queued: [page dicts], skipped: [page dicts], reason}``.
-    ``job_id`` is None when nothing was left to queue.
+    Pages are split so one job never covers more than the service's
+    SCAN_JOB_MAX_PAGES. Returns ``{job_id, job_ids, page_job_ids, queued,
+    skipped, unscannable, reason}`` — ``job_id`` is the first created job
+    (None when nothing was queued), ``job_ids`` lists every job created, and
+    ``page_job_ids`` maps each queued page id to its job.
     """
     wanted = []
     for value in page_ids:
@@ -138,22 +150,62 @@ def create_scan_job(page_ids: Sequence[int], label: str | None = None) -> dict:
         queued[0]["display_name"] if len(queued) == 1 else f"Re-track {len(queued)} pages"
     )
 
-    delegated, outcome = _delegate_create_job([p["id"] for p in queued], job_label)
-    if outcome == "created":
-        return {"job_id": delegated, "queued": queued, "skipped": skipped,
-                "unscannable": unscannable, "reason": ""}
-    if outcome == "refused":
+    # Split so one job never covers more than the service's page cap.
+    per_job = _scan_job_max_pages()
+    chunks = [
+        queued[i:i + per_job]
+        for i in range(0, len(queued), per_job)
+    ]
+    job_ids: list[int] = []
+    page_job_ids: dict[int, int] = {}
+    created: list[dict] = []
+    refused = False
+    for n, chunk in enumerate(chunks, start=1):
+        chunk_label = (
+            job_label if len(chunks) == 1 else f"{job_label} ({n}/{len(chunks)})"
+        )
+        delegated, outcome = _delegate_create_job(
+            [p["id"] for p in chunk], chunk_label
+        )
+        if outcome == "created":
+            new_id = int(delegated)
+        elif outcome == "refused":
+            refused = True
+            break
+        else:
+            new_id = _insert_scan_job(chunk, chunk_label)
+        job_ids.append(new_id)
+        for page in chunk:
+            page_job_ids[int(page["id"])] = new_id
+        created.extend(chunk)
+
+    if not job_ids:
         return {
             "job_id": None,
+            "job_ids": [],
+            "page_job_ids": {},
             "queued": [],
             "skipped": queued + skipped,
             "unscannable": unscannable,
             "reason": "already_queued",
         }
+    not_created = [p for p in queued if p not in created]
+    return {
+        "job_id": job_ids[0],
+        "job_ids": job_ids,
+        "page_job_ids": page_job_ids,
+        "queued": created,
+        "skipped": skipped + not_created,
+        "unscannable": unscannable,
+        "reason": "partial" if refused else "",
+    }
 
+
+def _insert_scan_job(chunk: list[dict], job_label: str) -> int:
+    """Local (no-service) INSERT of one page_scan job over ``chunk``."""
     now = utc_now()
     fingerprint = hashlib.sha1(
-        ("|".join(str(p["id"]) for p in queued) + "@" + now).encode("utf-8")
+        ("|".join(str(p["id"]) for p in chunk) + "@" + now).encode("utf-8")
     ).hexdigest()[:16]
 
     with db.transaction():
@@ -163,11 +215,11 @@ def create_scan_job(page_ids: Sequence[int], label: str | None = None) -> dict:
                               targets_total, targets_done, created_at, updated_at)
             VALUES ('page_scan', 'pending', ?, ?, ?, 0, ?, ?)
             """,
-            (f"ui:{fingerprint}", job_label, len(queued), now, now),
+            (f"ui:{fingerprint}", job_label, len(chunk), now, now),
         )
         job_id = int(cursor.lastrowid)
 
-        for position, page in enumerate(queued, start=1):
+        for position, page in enumerate(chunk, start=1):
             db.execute(
                 """
                 INSERT INTO job_targets (job_id, position, page_id, platform_page_id,
@@ -187,13 +239,11 @@ def create_scan_job(page_ids: Sequence[int], label: str | None = None) -> dict:
         db.execute(
             f"""
             UPDATE pages SET current_scan_status = 'queued', updated_at = ?
-            WHERE id IN ({','.join('?' for _ in queued)})
+            WHERE id IN ({','.join('?' for _ in chunk)})
             """,
-            (now, *[int(p["id"]) for p in queued]),
+            (now, *[int(p["id"]) for p in chunk]),
         )
-
-    return {"job_id": job_id, "queued": queued, "skipped": skipped,
-            "unscannable": unscannable, "reason": ""}
+    return job_id
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +401,49 @@ def cancel_job(job_id: int):
         else:
             flash(f"Job #{job_id} already finished.", "warning")
     return redirect(request.form.get("next") or url_for("queue.queue_index"))
+
+
+@bp.post("/queue/<int:job_id>/delete")
+def delete_job_confirm(job_id: int):
+    """Step 1 of job delete: show what would be removed, ask for confirmation."""
+    impact = queries.job_delete_impact(job_id)
+    if impact is None:
+        flash(f"Job #{job_id} does not exist.", "error")
+        return redirect(url_for("queue.queue_index"))
+    if not impact["job"]["can_delete"]:
+        flash(
+            f"Job #{job_id} is {impact['job']['status']} — let it finish first.",
+            "warning",
+        )
+        return redirect(request.form.get("next") or url_for("queue.queue_index"))
+    return render_template(
+        "job_delete_confirm.html",
+        title=f"Delete job #{job_id}",
+        active_nav="queue",
+        impact=impact,
+        next=request.form.get("next") or url_for("queue.queue_index"),
+    )
+
+
+@bp.post("/queue/<int:job_id>/delete/confirm")
+def delete_job_do(job_id: int):
+    """Step 2 of job delete: remove the job and the ads only it brought in."""
+    module = service()
+    delete = getattr(module, "delete_job", None) if module else None
+    if not callable(delete):
+        flash("Job delete is unavailable.", "error")
+        return redirect(url_for("queue.queue_index"))
+    try:
+        summary = delete(job_id)
+    except Exception as exc:
+        flash(f"Could not delete job #{job_id}: {exc}", "error")
+        return redirect(request.form.get("next") or url_for("queue.queue_index"))
+    flash(
+        f"Job #{summary['job_id']} deleted "
+        f"({summary['ads_deleted']} ad(s), {summary['products_deleted']} product(s) removed).",
+        "success",
+    )
+    return redirect(url_for("queue.queue_index"))
 
 
 @bp.post("/queue/pause")

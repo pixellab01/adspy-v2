@@ -594,11 +594,33 @@ SELECT
     (SELECT COUNT(*) FROM job_targets t WHERE t.job_id = j.id AND t.status = 'running') AS running_targets,
     (SELECT COALESCE(SUM(t.unique_ads), 0) FROM job_targets t WHERE t.job_id = j.id)    AS unique_ads,
     (SELECT COALESCE(SUM(t.scrolls), 0)    FROM job_targets t WHERE t.job_id = j.id)    AS scrolls,
-    (SELECT COUNT(*) FROM job_batches b WHERE b.job_id = j.id)                          AS batches
+    (SELECT COUNT(*) FROM job_batches b WHERE b.job_id = j.id)                          AS batches,
+    (SELECT COALESCE(SUM(t.estimated_results), 0) FROM job_targets t WHERE t.job_id = j.id) AS est_total
 FROM jobs j
 """
 
 JOB_OPEN_STATES = OPEN_JOB_STATES
+
+
+def _coverage_class(pct: float | None) -> str:
+    """CSS class for a coverage percentage: <90 red, <95 amber, else none.
+
+    Takes the UNROUNDED value: 94.6% is below 95 and must colour amber even
+    though the displayed whole-percent rounds to 95.
+    """
+    if pct is None:
+        return ""
+    if pct < 90:
+        return "cov-red"
+    if pct < 95:
+        return "cov-amber"
+    return ""
+
+
+def _coverage_pct(seen: int, estimate: int) -> tuple[int | None, str]:
+    raw = (100.0 * seen / estimate) if estimate else None
+    pct = min(100, int(round(raw))) if raw is not None else None
+    return pct, _coverage_class(raw)
 
 
 def _decorate_job(row: dict) -> dict:
@@ -610,6 +632,12 @@ def _decorate_job(row: dict) -> dict:
         row.get("status") == "completed" and int(row.get("failed_targets") or 0) > 0
     )
     row["can_cancel"] = row["is_open"]
+    row["can_delete"] = row.get("status") in (
+        "pending", "completed", "failed", "cancelled",
+    )
+    est = int(row.get("est_total") or 0)
+    seen = int(row.get("unique_ads") or 0)
+    row["coverage_pct"], row["coverage_class"] = _coverage_pct(seen, est)
     return row
 
 
@@ -641,7 +669,8 @@ def job_targets(job_id: int) -> list[dict]:
                t.page_url, t.label, t.status, t.outcome, t.scrolls, t.unique_ads,
                t.represented_ads, t.estimated_results, t.message,
                t.started_at, t.finished_at,
-               p.name AS page_name, p.alias AS page_alias
+               p.name AS page_name, p.alias AS page_alias,
+               COALESCE(p.active_ads, 0) AS page_live_ads
         FROM job_targets t
         LEFT JOIN pages p ON p.id = t.page_id
         WHERE t.job_id = ?
@@ -658,7 +687,7 @@ def job_targets(job_id: int) -> list[dict]:
         )
         estimate = int(row.get("estimated_results") or 0)
         seen = int(row.get("unique_ads") or 0)
-        row["coverage_pct"] = min(100, int(round(100 * seen / estimate))) if estimate else None
+        row["coverage_pct"], row["coverage_class"] = _coverage_pct(seen, estimate)
     return rows
 
 
@@ -675,6 +704,71 @@ def job_batches(job_id: int, limit: int = 25) -> list[dict]:
         """,
         (int(job_id), int(limit)),
     )
+
+
+def _accepted_library_ids(*, job_id: int | None = None,
+                         exclude_job_id: int | None = None) -> set[str]:
+    """library_ids accepted by ``accepted`` batches.
+
+    Pass ``job_id`` for one job's union, or ``exclude_job_id`` for every other
+    job's union — the pair drives job-delete's exclusive-ad computation.
+    """
+    sql = "SELECT accepted_ad_ids_json FROM job_batches WHERE status = 'accepted'"
+    params: list[Any] = []
+    if job_id is not None:
+        sql += " AND job_id = ?"
+        params.append(int(job_id))
+    if exclude_job_id is not None:
+        sql += " AND job_id != ?"
+        params.append(int(exclude_job_id))
+    ids: set[str] = set()
+    for row in db.fetch_all(sql, params):
+        raw = row[0] if not isinstance(row, dict) else row.get("accepted_ad_ids_json")
+        try:
+            parsed = json.loads(raw or "[]")
+        except (TypeError, ValueError):
+            continue
+        for value in parsed if isinstance(parsed, list) else []:
+            text = str(value or "").strip()
+            if text:
+                ids.add(text)
+    return ids
+
+
+def job_delete_impact(job_id: int) -> dict | None:
+    """What deleting a job would remove — shown on the confirm screen.
+
+    ``exclusive_ads`` counts ads whose library_id was accepted by this job's
+    batches and by no other job's: those are the only ad rows a delete takes
+    with it. Ads re-captured by a later scan stay, because they are that
+    scan's data too.
+    """
+    job = get_job(job_id)
+    if job is None:
+        return None
+    mine = _accepted_library_ids(job_id=int(job_id))
+    others = _accepted_library_ids(exclude_job_id=int(job_id))
+    exclusive = mine - others
+    exclusive_count = 0
+    if exclusive:
+        row = db.fetch_one(
+            f"SELECT COUNT(*) FROM ads WHERE library_id IN "
+            f"({_placeholders(list(exclusive))})",
+            list(exclusive),
+        )
+        exclusive_count = int(row[0] if row else 0)
+    targets = db.fetch_one(
+        "SELECT COUNT(*) FROM job_targets WHERE job_id = ?", (int(job_id),)
+    )
+    batches = db.fetch_one(
+        "SELECT COUNT(*) FROM job_batches WHERE job_id = ?", (int(job_id),)
+    )
+    return {
+        "job": job,
+        "targets": int(targets[0] if targets else 0),
+        "batches": int(batches[0] if batches else 0),
+        "exclusive_ads": exclusive_count,
+    }
 
 
 def queue_counts() -> dict:

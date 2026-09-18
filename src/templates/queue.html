@@ -11,7 +11,7 @@
   <div class="table-wrap">
     <table class="tbl">
       {{ ui.thead([('#', 'num'), ('Page',), ('Status',), ('Outcome',), ('Scrolls', 'num'),
-                   ('Unique ads', 'num'), ('FB est.', 'num'), ('Coverage', 'num'), ('Message',)]) }}
+                   ('Unique ads', 'num'), ('Live ads', 'num'), ('FB est.', 'num'), ('Coverage', 'num'), ('Message',)]) }}
       <tbody>
         {% for target in rows %}
           <tr>
@@ -25,8 +25,9 @@
             <td>{{ target.outcome or '—' }}</td>
             <td class="num">{{ target.scrolls }}</td>
             <td class="num">{{ target.unique_ads }}</td>
+            <td class="num muted">{{ target.page_live_ads }}</td>
             <td class="num muted">{{ target.estimated_results or '—' }}</td>
-            <td class="num muted">{{ (target.coverage_pct ~ '%') if target.coverage_pct is not none else '—' }}</td>
+            <td class="num {{ target.coverage_class }}">{{ (target.coverage_pct ~ '%') if target.coverage_pct is not none else '—' }}</td>
             <td class="wrap muted">{{ target.message or '' }}</td>
           </tr>
         {% endfor %}
@@ -60,6 +61,12 @@
             <button class="btn sm warn" type="submit">Cancel</button>
           </form>
         {% endif %}
+        {% if job.can_delete %}
+          <form method="post" action="/queue/{{ job.id }}/delete">
+            <input type="hidden" name="next" value="{{ request.full_path }}">
+            <button class="btn sm danger" type="submit" title="Delete this job and the data only it brought in">Delete</button>
+          </form>
+        {% endif %}
       </div>
     </header>
 
@@ -71,6 +78,9 @@
       <span>{{ job.done_targets }}/{{ job.targets }} pages</span>
       {% if job.failed_targets %}<span class="delta-down">{{ job.failed_targets }} failed</span>{% endif %}
       <span>{{ job.unique_ads }} ads seen</span>
+      {% if job.coverage_pct is not none %}
+        <span class="{{ job.coverage_class }}" title="scraped unique ads vs FB estimated results">coverage {{ job.coverage_pct }}%</span>
+      {% endif %}
       <span>{{ job.scrolls }} scrolls</span>
       <span>{{ job.batches }} batches</span>
       <span>created {{ job.created_at }}</span>

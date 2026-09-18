@@ -279,7 +279,8 @@ def retrack_pages(group_id: int):
     group = svc.get_group(group_id) or {}
     result = create_scan_job(page_ids, label=str(group.get("name") or "brand group"))
     if result["job_id"]:
-        flash(f"Job #{result['job_id']} queued: {len(result['queued'])} page(s).", "success")
+        ids = ", ".join(f"#{i}" for i in result.get("job_ids") or [result["job_id"]])
+        flash(f"Job(s) {ids} queued: {len(result['queued'])} page(s).", "success")
         return redirect(url_for("queue.queue_index"))
     if result["reason"] == "already_queued":
         flash("Those pages are already queued or running.", "warning")

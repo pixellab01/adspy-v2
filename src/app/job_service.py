@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import secrets
 import sqlite3
 import uuid
@@ -34,8 +35,13 @@ from .db import execute, fetch_all, fetch_one, transaction
 from .meta_links import meta_ads_library_url
 from .time_utils import parse_utc, utc_now, utc_shift
 
-# --- vocabulary ---------------------------------------------------------------
+# Vocabulary -----------------------------------------------------------------
 JOB_TYPES = ("page_scan", "keyword")
+# One scan job never covers more than this many pages: a brand with 40 pages
+# becomes 8 small jobs the worker claims one at a time, instead of one giant
+# job whose per-page progress is unreadable and whose failure costs the whole
+# brand. Pacing is unchanged — the worker still scans one page at a time.
+SCAN_JOB_MAX_PAGES = 5
 JOB_ACTIVE_STATUSES = ("pending", "claimed", "running")
 JOB_TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 TARGET_ACTIVE_STATUSES = ("pending", "running")
@@ -1450,6 +1456,25 @@ def _pages_with_open_targets(page_ids: Sequence[int]) -> set[int]:
     return {_int(r["page_id"]) for r in rows}
 
 
+def _open_job_ids_for_pages(page_ids: Sequence[int]) -> list[int]:
+    """Live job ids with an open target on any of these pages, oldest first."""
+    ids = [int(p) for p in page_ids]
+    if not ids:
+        return []
+    rows = fetch_all(
+        f"""
+        SELECT DISTINCT t.job_id AS job_id
+          FROM job_targets t JOIN jobs j ON j.id = t.job_id
+         WHERE t.page_id IN ({_placeholders(ids)})
+           AND j.status IN {JOB_ACTIVE_STATUSES}
+           AND t.status IN {TARGET_ACTIVE_STATUSES}
+         ORDER BY t.job_id
+        """,
+        ids,
+    )
+    return [_int(r["job_id"]) for r in rows]
+
+
 def rescan_product_pages(
     product_id: Any,
     *,
@@ -1457,13 +1482,13 @@ def rescan_product_pages(
     label: str | None = None,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
-    """Queue ONE page_scan job over the pages that run this product.
+    """Queue page_scan jobs over the pages that run this product.
 
-    Returns ``{productId, productName, jobId, created, queued, skipped,
-    unscannable, excludedInactive, reason}``. ``jobId`` is ``None`` when nothing
-    could be queued; ``reason`` then says why (``already_queued`` /
-    ``no_meta_page_id`` / ``no_pages``). A ``duplicate`` reason carries the id of
-    the job an earlier click created today.
+    Pages are split so one job never covers more than SCAN_JOB_MAX_PAGES.
+    Returns ``{productId, productName, jobId, jobIds, created, queued, skipped,
+    unscannable, excludedInactive, reason}``. ``jobId`` is the first created
+    job (``None`` when nothing could be queued); ``reason`` then says why
+    (``already_queued`` / ``no_meta_page_id`` / ``no_pages`` / ``duplicate``).
 
     * default set = pages with at least one ACTIVE ad; ``include_inactive``
       adds the rest (a page whose ads all stopped is usually noise to re-scan);
@@ -1505,37 +1530,253 @@ def rescan_product_pages(
     # busy (the first click queued them), and reporting that as a generic
     # "already queued" hides the useful answer — "that is job #N from today".
     base_key = (idempotency_key or "").strip() or f"product:{product['id']}:{utc_now()[:10]}"
-    key = base_key
-    suffix = 1
-    while True:
-        existing = fetch_one("SELECT id, status FROM jobs WHERE idempotency_key = ?", (key,))
-        if existing is None:
-            break
-        if str(existing["status"]) in JOB_ACTIVE_STATUSES:
-            result.update(jobId=_int(existing["id"]), reason="duplicate",
-                          queued=[], skipped=queued + skipped)
-            return result
-        suffix += 1
-        key = f"{base_key}:{suffix}"
 
     if not queued:
         if skipped:
             result["reason"] = "already_queued"
+            # Name the live jobs covering these pages — the old single-job
+            # "duplicate" message named one job; with chunking there can be
+            # several, so name them all.
+            live_ids = _open_job_ids_for_pages([p["id"] for p in skipped])
+            if live_ids:
+                result["jobId"] = live_ids[0]
+                result["jobIds"] = live_ids
         elif unscannable:
             result["reason"] = "no_meta_page_id"
         else:
             result["reason"] = "no_pages"
         return result
 
-    job_label = (label or "").strip() or (
-        f"Re-scan {product_name or 'product'} ({len(queued)} page{'s' if len(queued) != 1 else ''})"
-    )
-    try:
-        job = create_job([p["id"] for p in queued], label=job_label, idempotency_key=key)
-    except DuplicateJobError:
-        # A worker claimed one of these pages between our clash check and the
-        # insert. Report, never fall back to a second insert.
-        result.update(reason="already_queued", queued=[], skipped=queued + skipped)
+    # One job per SCAN_JOB_MAX_PAGES pages; each chunk gets its own idempotency
+    # key so a double-click still collapses onto the same jobs.
+    chunks = [
+        queued[i:i + SCAN_JOB_MAX_PAGES]
+        for i in range(0, len(queued), SCAN_JOB_MAX_PAGES)
+    ]
+    job_ids: list[int] = []
+    created_pages: list[dict] = []
+    for n, chunk in enumerate(chunks, start=1):
+        chunk_label = (label or "").strip() or (
+            f"Re-scan {product_name or 'product'} "
+            f"({len(chunk)} page{'s' if len(chunk) != 1 else ''})"
+        )
+        if len(chunks) > 1:
+            chunk_label = f"{chunk_label} ({n}/{len(chunks)})"
+        key: str | None = f"{base_key}:p{n}"
+        suffix = 1
+        while key is not None:
+            existing = fetch_one(
+                "SELECT id, status FROM jobs WHERE idempotency_key = ?", (key,)
+            )
+            if existing is None:
+                break
+            if str(existing["status"]) in JOB_ACTIVE_STATUSES:
+                job_ids.append(_int(existing["id"]))
+                key = None  # duplicate chunk: reuse the live job
+            else:
+                suffix += 1
+                key = f"{base_key}:p{n}:{suffix}"
+        if key is None:
+            continue
+        try:
+            job = create_job(
+                [p["id"] for p in chunk], label=chunk_label, idempotency_key=key
+            )
+        except DuplicateJobError:
+            # A worker claimed one of these pages between our clash check and
+            # the insert. Report, never fall back to a second insert.
+            result.update(reason="already_queued", queued=[], skipped=queued + skipped)
+            return result
+        job_ids.append(_int(job["jobId"]))
+        created_pages.extend(chunk)
+
+    if not created_pages and len(job_ids) == len(chunks):
+        # Every chunk collapsed onto a live job: a pure double-click.
+        result.update(
+            jobId=job_ids[0],
+            jobIds=job_ids,
+            reason="duplicate",
+            queued=[],
+            skipped=queued + skipped,
+        )
         return result
-    result.update(jobId=_int(job["jobId"]), created=True)
+    if not job_ids:
+        result.update(reason="no_pages")
+        return result
+    result.update(
+        jobId=job_ids[0],
+        jobIds=job_ids,
+        created=bool(created_pages),
+        queued=created_pages,
+    )
     return result
+
+
+# ---------------------------------------------------------------------------
+# delete a job — and only the data that job alone brought in
+# ---------------------------------------------------------------------------
+# A job's accepted batches carry accepted_ad_ids_json: the union of library_ids
+# the job accepted. An ad is *exclusive* to the job when no other job's batches
+# ever accepted it. Deleting the job removes:
+#   * the job row (its targets and batches cascade via FK),
+#   * the exclusive ads (their versions / product links / transcript links
+#     cascade via FK),
+#   * auto-derived products left with zero ad links that the owner never
+#     shortlisted (shortlisted products always stay),
+# and refreshes the affected pages' counters from the ads table.
+# Ads a later scan re-captured are that scan's data too, so they stay.
+DELETEABLE_JOB_STATUSES = ("pending",) + JOB_TERMINAL_STATUSES
+
+
+def _batch_library_ids(where: str, params: Sequence[Any]) -> set[str]:
+    ids: set[str] = set()
+    for row in fetch_all(
+        f"SELECT accepted_ad_ids_json FROM job_batches WHERE status = 'accepted' AND {where}",
+        params,
+    ):
+        try:
+            parsed = json.loads(row[0] or "[]")
+        except (TypeError, ValueError):
+            continue
+        for value in parsed if isinstance(parsed, list) else []:
+            text = str(value or "").strip()
+            if text:
+                ids.add(text)
+    return ids
+
+
+def exclusive_library_ids(job_id: int) -> set[str]:
+    """library_ids accepted by this job's batches and by no other job's."""
+    mine = _batch_library_ids("job_id = ?", (int(job_id),))
+    if not mine:
+        return set()
+    others = _batch_library_ids("job_id != ?", (int(job_id),))
+    return mine - others
+
+
+def delete_job(job_id: int) -> dict[str, Any]:
+    """Delete a finished (or never-started) job and its exclusive ads.
+
+    Refuses claimed/running jobs — deleting under a live worker would corrupt
+    the scan. Returns a summary ``{job_id, ads_deleted, products_deleted}``.
+    """
+    job_id = int(job_id)
+    now = utc_now()
+    with transaction():
+        row = fetch_one(
+            "SELECT id, status, label FROM jobs WHERE id = ?", (job_id,)
+        )
+        if row is None:
+            raise NotFoundError(f"job {job_id} does not exist")
+        status = str(row["status"])
+        if status not in DELETEABLE_JOB_STATUSES:
+            raise JobError(
+                f"job #{job_id} is {status} — let it finish before deleting it",
+                code="JOB_NOT_DELETEABLE",
+            )
+
+        exclusive = exclusive_library_ids(job_id)
+        ad_ids: list[int] = []
+        if exclusive:
+            placeholders = ",".join("?" for _ in exclusive)
+            ad_ids = [
+                int(r[0])
+                for r in fetch_all(
+                    f"SELECT id FROM ads WHERE library_id IN ({placeholders})",
+                    list(exclusive),
+                )
+            ]
+
+        products_deleted = 0
+        if ad_ids:
+            placeholders = ",".join("?" for _ in ad_ids)
+            page_rows = fetch_all(
+                f"SELECT DISTINCT page_id FROM ads WHERE id IN ({placeholders})",
+                ad_ids,
+            )
+            page_ids = [int(r[0]) for r in page_rows if r[0] is not None]
+            candidate_products = [
+                int(r[0])
+                for r in fetch_all(
+                    f"SELECT DISTINCT product_id FROM ad_products WHERE ad_id IN ({placeholders})",
+                    ad_ids,
+                )
+            ]
+            # The ad rows go; versions / product links / transcript links
+            # cascade via FK (PRAGMA foreign_keys = ON).
+            execute(f"DELETE FROM ads WHERE id IN ({placeholders})", ad_ids)
+            if candidate_products:
+                placeholders = ",".join("?" for _ in candidate_products)
+                cursor = execute(
+                    f"""
+                    DELETE FROM products
+                     WHERE shortlist_state IS NULL
+                       AND id IN ({placeholders})
+                       AND id NOT IN (SELECT DISTINCT product_id FROM ad_products)
+                    """,
+                    candidate_products,
+                )
+                products_deleted = int(cursor.rowcount or 0)
+            if page_ids:
+                placeholders = ",".join("?" for _ in page_ids)
+                execute(
+                    f"""
+                    UPDATE pages
+                       SET total_ads = (SELECT COUNT(*) FROM ads
+                                        WHERE page_id = pages.id),
+                           active_ads = (SELECT COUNT(*) FROM ads
+                                          WHERE page_id = pages.id
+                                            AND status = 'active'),
+                           represented_ads = (SELECT COALESCE(SUM(represented_ad_count), 0)
+                                                FROM ads
+                                               WHERE page_id = pages.id
+                                                 AND status = 'active'),
+                           updated_at = ?
+                     WHERE id IN ({placeholders})
+                    """,
+                    [now, *page_ids],
+                )
+
+        # Capture the job's pages BEFORE the job row goes: its targets cascade
+        # away with it (job_targets.job_id ON DELETE CASCADE).
+        target_page_ids = [
+            int(r[0])
+            for r in fetch_all(
+                "SELECT DISTINCT page_id FROM job_targets "
+                "WHERE job_id = ? AND page_id IS NOT NULL",
+                (job_id,),
+            )
+        ]
+
+        # The job row itself; its targets and batches cascade via FK.
+        execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+
+        # A deleted job must not leave its pages marked 'queued': reset pages
+        # whose only open targets belonged to this job. Pages with a live
+        # target on another job keep their status — the other job still owns
+        # them.
+        if target_page_ids:
+            placeholders = ",".join("?" for _ in target_page_ids)
+            open_jobs = ",".join("?" for _ in JOB_ACTIVE_STATUSES)
+            open_targets = ",".join("?" for _ in TARGET_ACTIVE_STATUSES)
+            execute(
+                f"""
+                UPDATE pages SET current_scan_status = 'idle', updated_at = ?
+                 WHERE id IN ({placeholders})
+                   AND current_scan_status = 'queued'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM job_targets t
+                       JOIN jobs j ON j.id = t.job_id
+                       WHERE t.page_id = pages.id
+                         AND j.status IN ({open_jobs})
+                         AND t.status IN ({open_targets})
+                   )
+                """,
+                [now, *target_page_ids, *JOB_ACTIVE_STATUSES, *TARGET_ACTIVE_STATUSES],
+            )
+
+    return {
+        "job_id": job_id,
+        "ads_deleted": len(ad_ids),
+        "products_deleted": products_deleted,
+    }

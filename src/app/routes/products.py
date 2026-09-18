@@ -592,8 +592,9 @@ def retrack(product_id: int):
 
     result = create_scan_job(page_ids, label=product["product_name"])
     if result["job_id"]:
+        ids = ", ".join(f"#{i}" for i in result.get("job_ids") or [result["job_id"]])
         flash(
-            f"Job #{result['job_id']} queued: {len(result['queued'])} page(s) "
+            f"Job(s) {ids} queued: {len(result['queued'])} page(s) "
             f"running {product['product_name']}.",
             "success",
         )

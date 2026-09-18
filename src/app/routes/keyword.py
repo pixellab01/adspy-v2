@@ -123,8 +123,9 @@ def _flash_scan_result(result: dict, *, what: str = "page") -> None:
     unscannable = len(result.get("unscannable") or [])
     blocked = len(result.get("blocked") or [])
     if result.get("job_id"):
+        ids = ", ".join(f"#{i}" for i in result.get("job_ids") or [result["job_id"]])
         flash(
-            f"Scan job #{result['job_id']} queued for {queued} {what}{'s' if queued != 1 else ''} "
+            f"Scan job(s) {ids} queued for {queued} {what}{'s' if queued != 1 else ''} "
             "- the extension picks it up on its next claim.",
             "success",
         )
