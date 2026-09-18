@@ -1130,3 +1130,14 @@ tr.is-hidden-page td{opacity:.55}
 .delta-btn.delta-down{color:var(--red)}
 .delta-btn.delta-flat{color:var(--text-faint);font-weight:400}
 .delta-btn:hover{text-decoration:underline}
+
+/* --- product ad-history (scan growth chart) --- */
+.hist-summary{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.hist-now{font-size:16px}
+.hist-delta{font-size:14px}
+.hist-bars{display:flex;align-items:flex-end;gap:8px;height:110px;padding:8px 4px 0;border-bottom:1px solid var(--border);margin-bottom:14px;overflow-x:auto}
+.hist-col{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;min-width:44px;height:100%}
+.hist-bar{width:30px;max-height:76px;border-radius:3px 3px 0 0;background:var(--accent,#4f8ff7)}
+.hist-x{font-size:10px;color:var(--text-faint);margin-top:4px;font-family:var(--mono)}
+.hist-v{font-size:11px;font-weight:600;font-family:var(--mono)}
+.trend-badge{font-family:var(--mono);font-size:11px;font-weight:600;white-space:nowrap}

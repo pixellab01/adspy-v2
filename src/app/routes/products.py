@@ -203,6 +203,10 @@ def _detail_context(product_id: int) -> dict | None:
     columns_open = request.args.get("columns") == "1"
 
     ads = svc.product_ads(product_id, language=language)
+    # --- scan history ("18 the, ab 21"): per-scan live/new/stopped + growth
+    page_rollup = svc.product_page_rollup(product_id)
+    svc.attach_page_rollup_trends(product_id, page_rollup)
+    history = svc.product_scan_history(product_id)
     # "cards" is the picture view of the same ads, through the one shared ad
     # tile in _drawer.html. The table stays the default because it is what gets
     # sorted and exported.
@@ -221,7 +225,8 @@ def _detail_context(product_id: int) -> dict | None:
         # --- the grouping view -------------------------------------------
         "reach": svc.product_reach(product_id),
         "brand_groups": svc.product_groups(product_id),
-        "page_rollup": svc.product_page_rollup(product_id),
+        "page_rollup": page_rollup,
+        "history": history,
         # --- transcription (reads only; nothing here starts anything) ------
         **_transcription_context(connection, product_id, video_lang),
         "columns": columns,

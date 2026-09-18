@@ -532,6 +532,7 @@ def list_products(
     )
     items = [_decorate_product(row) for row in rows]
     attach_advertiser_pages(items, page_ids=scoped)
+    attach_product_trends(items)
     return {
         "items": items,
         "section": section,
@@ -948,6 +949,131 @@ def product_page_rollup(product_id: int) -> list[dict]:
     for row in rows:
         row["oldest_day"] = (row.get("oldest_start_date") or "")[:10]
     return rows
+
+
+def _growth_pct(current: int, previous: int | None) -> float | None:
+    """Growth % of ``current`` vs ``previous``; None when not computable."""
+    if previous is None or previous <= 0:
+        return None
+    return round(100.0 * (current - previous) / previous, 1)
+
+
+def product_scan_history(product_id: int, limit: int = 12) -> list[dict]:
+    """This product's scan history, newest first, with per-scan deltas.
+
+    Each entry aggregates ``product_scan_snapshots`` over the product's pages
+    for one scan moment: live ads, new ads, stopped ads — plus ``delta`` and
+    ``growth_pct`` vs the previous scan. This is the "18 the, ab 21, kitni
+    growth" view. Needs two scanned moments before a delta appears.
+    """
+    rows = _rows(
+        """
+        SELECT MAX(scanned_at)                              AS scanned_at,
+               SUM(active_ads)                              AS active_ads,
+               SUM(new_ads)                                 AS new_ads,
+               SUM(stopped_ads)                             AS stopped_ads,
+               COUNT(DISTINCT page_id)                      AS pages
+        FROM product_scan_snapshots
+        WHERE product_id=?
+        GROUP BY job_id
+        ORDER BY scanned_at DESC, job_id DESC
+        LIMIT ?
+        """,
+        (int(product_id), int(limit)),
+    )
+    ordered = list(reversed(rows))  # oldest -> newest for delta math
+    for prev, cur in zip([None, *ordered], ordered):
+        cur_active = int(cur.get("active_ads") or 0)
+        if prev is None:
+            cur["delta"] = None
+            cur["growth_pct"] = None
+        else:
+            prev_active = int(prev.get("active_ads") or 0)
+            cur["delta"] = cur_active - prev_active
+            cur["growth_pct"] = _growth_pct(cur_active, prev_active)
+        cur["active_ads"] = cur_active
+        cur["new_ads"] = int(cur.get("new_ads") or 0)
+        cur["stopped_ads"] = int(cur.get("stopped_ads") or 0)
+        cur["day"] = (cur.get("scanned_at") or "")[:10]
+    return list(reversed(ordered))
+
+
+def attach_page_rollup_trends(product_id: int, rollup: list[dict]) -> None:
+    """Add ``delta``/``growth_pct``/``prev_active`` to each page_rollup row.
+
+    Compares the page's latest snapshot against the one before it, so the
+    "Where this product runs" table shows which pages are scaling the product
+    and which are winding it down.
+    """
+    page_ids = [int(r["page_id"]) for r in rollup if r.get("page_id")]
+    if not page_ids:
+        return
+    placeholders = ",".join("?" for _ in page_ids)
+    rows = _rows(
+        f"""
+        SELECT page_id, scanned_at, active_ads
+        FROM product_scan_snapshots
+        WHERE product_id=? AND page_id IN ({placeholders})
+        ORDER BY page_id, scanned_at DESC
+        """,
+        (int(product_id), *page_ids),
+    )
+    latest: dict[int, dict] = {}
+    previous: dict[int, dict] = {}
+    for r in rows:
+        pid = int(r["page_id"])
+        if pid not in latest:
+            latest[pid] = r
+        elif pid not in previous:
+            previous[pid] = r
+    for row in rollup:
+        pid = int(row["page_id"])
+        cur = latest.get(pid)
+        prev = previous.get(pid)
+        row["last_scan_day"] = ((cur or {}).get("scanned_at") or "")[:10] or None
+        if cur is None or prev is None:
+            row["prev_active"] = None
+            row["delta"] = None
+            row["growth_pct"] = None
+        else:
+            cur_active = int(cur.get("active_ads") or 0)
+            prev_active = int(prev.get("active_ads") or 0)
+            row["prev_active"] = prev_active
+            row["delta"] = cur_active - prev_active
+            row["growth_pct"] = _growth_pct(cur_active, prev_active)
+
+
+def attach_product_trends(items: list[dict]) -> None:
+    """Add ``trend_delta``/``trend_growth_pct`` to product list rows.
+
+    One batched query over the latest two snapshots per product — the list
+    stays one query, not N. Products scanned fewer than twice get None.
+    """
+    ids = [int(item["id"]) for item in items if item.get("id")]
+    for item in items:
+        item["trend_delta"] = None
+        item["trend_growth_pct"] = None
+    if not ids:
+        return
+    placeholders = ",".join("?" for _ in ids)
+    rows = _rows(
+        f"""
+        SELECT product_id, MAX(scanned_at) AS scanned_at, SUM(active_ads) AS active_ads
+        FROM product_scan_snapshots
+        WHERE product_id IN ({placeholders})
+        GROUP BY product_id, job_id
+        ORDER BY product_id, scanned_at DESC, job_id DESC
+        """,
+        ids,
+    )
+    seen: dict[int, list[int]] = {}
+    for r in rows:
+        seen.setdefault(int(r["product_id"]), []).append(int(r["active_ads"] or 0))
+    by_id = {int(item["id"]): item for item in items if item.get("id")}
+    for pid, series in seen.items():
+        if len(series) >= 2 and pid in by_id:
+            by_id[pid]["trend_delta"] = series[0] - series[1]
+            by_id[pid]["trend_growth_pct"] = _growth_pct(series[0], series[1])
 
 
 def product_ad_cards(product_id: int, *, language: str = "", limit: int = 60) -> list[dict]:

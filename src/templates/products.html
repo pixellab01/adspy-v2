@@ -279,7 +279,8 @@
                       script_languages, clusters, transcripts, cell, back,
                       reach, brand_groups, page_rollup, ads_view, ad_cards,
                       transcription, transcribe_languages, provider, run,
-                      videos=[], video_summary=none, video_lang='', video_languages=[]) %}
+                      videos=[], video_summary=none, video_lang='', video_languages=[],
+                      history=[]) %}
 
   {%- set base_args = {'cols': columns|join(','), 'lang': language or none,
                        'scripts': '1' if scripts_open else none,
@@ -328,6 +329,67 @@
   </div>
 
   {#- ------------------------------------------------------------------
+      Ad history. One row per completed scan of this product's pages:
+      live ads, new ads, stopped ads, and the growth vs the previous scan.
+      Bars are pure CSS; the table carries the exact numbers.
+      ------------------------------------------------------------------ -#}
+  {% call ui.drawer_block('Ad history') %}
+    {% if history %}
+      {% set latest = history[0] %}
+      {% set peak = history|map(attribute='active_ads')|max %}
+      <div class="hist-summary">
+        <span class="hist-now"><b>{{ latest.active_ads }}</b> live ads</span>
+        {% if latest.delta is not none %}
+          <span class="hist-delta {{ 'delta-up' if latest.delta > 0 else ('delta-down' if latest.delta < 0 else 'delta-flat') }}">
+            {{ '+' if latest.delta > 0 }}{{ latest.delta }}
+            {%- if latest.growth_pct is not none %} ({{ '+' if latest.growth_pct > 0 }}{{ latest.growth_pct }}%){% endif %}
+          </span>
+          <span class="muted small">vs previous scan</span>
+        {% else %}
+          <span class="muted small">first scan recorded — growth appears after the next re-scan</span>
+        {% endif %}
+        <span class="muted small">· +{{ latest.new_ads }} new · −{{ latest.stopped_ads }} stopped this scan</span>
+      </div>
+      <div class="hist-bars" role="img" aria-label="live ads per scan">
+        {% for row in history|reverse %}
+          {% set h = (100 * row.active_ads / peak)|round(0, 'ceil') if peak else 0 %}
+          <div class="hist-col" title="{{ row.day }}: {{ row.active_ads }} live, +{{ row.new_ads }} new, −{{ row.stopped_ads }} stopped">
+            <div class="hist-bar {{ 'hist-first' if loop.first else '' }}" style="height:{{ [h, 4]|max }}%"></div>
+            <div class="hist-x">{{ row.day[5:] }}</div>
+            <div class="hist-v">{{ row.active_ads }}</div>
+          </div>
+        {% endfor %}
+      </div>
+      <div class="table-wrap">
+        <table class="tbl dense">
+          <thead>
+            <tr><th>Scan</th><th class="num">Live</th><th class="num">New</th>
+                <th class="num">Stopped</th><th class="num">Δ</th><th class="num">Growth</th></tr>
+          </thead>
+          <tbody>
+            {% for row in history %}
+              <tr>
+                <td class="muted">{{ row.day }}</td>
+                <td class="num"><b>{{ row.active_ads }}</b></td>
+                <td class="num delta-up">+{{ row.new_ads }}</td>
+                <td class="num {{ 'delta-down' if row.stopped_ads else 'muted' }}">−{{ row.stopped_ads }}</td>
+                <td class="num {{ 'delta-up' if row.delta is not none and row.delta > 0 else ('delta-down' if row.delta is not none and row.delta < 0 else 'muted') }}">
+                  {% if row.delta is none %}—{% else %}{{ '+' if row.delta > 0 }}{{ row.delta }}{% endif %}
+                </td>
+                <td class="num {{ 'delta-up' if row.growth_pct is not none and row.growth_pct > 0 else ('delta-down' if row.growth_pct is not none and row.growth_pct < 0 else 'muted') }}">
+                  {% if row.growth_pct is none %}—{% else %}{{ '+' if row.growth_pct > 0 }}{{ row.growth_pct }}%{% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      {{ ui.empty_inline('No scan history yet. Re-scan this product\u2019s pages and the growth chart appears here.', 6) }}
+    {% endif %}
+  {% endcall %}
+
+  {#- ------------------------------------------------------------------
       Where it runs. This is "product-wise grouping" in one block: the same
       offer seen across every advertiser page and every brand group that runs
       it, with the compression ratio that is the reason this tool exists —
@@ -367,7 +429,7 @@
     <div class="table-wrap">
       <table class="tbl dense">
         <thead>
-          <tr><th>Advertiser page</th><th class="num">Active</th><th class="num">Represented</th>
+          <tr><th>Advertiser page</th><th class="num">Active</th><th class="num">Δ</th><th class="num">Represented</th>
               <th class="num">Scripts</th><th>Oldest ad</th></tr>
         </thead>
         <tbody>
@@ -376,12 +438,16 @@
               <td><a class="page-link internal" href="{{ url_for('pages.detail', page_id=row.page_id) }}">{{ row.page_name }}</a>
                   <small class="muted">ID {{ row.platform_page_id or '—' }}</small></td>
               <td class="num"><span class="adcount">{{ row.active_ads }}</span></td>
+              <td class="num {{ 'delta-up' if row.delta is not none and row.delta > 0 else ('delta-down' if row.delta is not none and row.delta < 0 else 'muted') }}"
+                  title="{% if row.delta is none %}only one scan so far{% else %}was {{ row.prev_active }}, now {{ row.active_ads }}{% if row.growth_pct is not none %} ({{ '+' if row.growth_pct > 0 }}{{ row.growth_pct }}%){% endif %}{% endif %}">
+                {% if row.delta is none %}—{% else %}{{ '+' if row.delta > 0 }}{{ row.delta }}{% endif %}
+              </td>
               <td class="num">{{ row.represented_ads }}</td>
               <td class="num">{{ row.scripts or '—' }}</td>
               <td class="muted">{{ row.oldest_day or '—' }}</td>
             </tr>
           {% else %}
-            {{ ui.empty_inline('No advertiser pages carry this product any more.', 5) }}
+            {{ ui.empty_inline('No advertiser pages carry this product any more.', 6) }}
           {% endfor %}
         </tbody>
       </table>
@@ -595,7 +661,7 @@
                     reach, brand_groups, page_rollup, ads_view, ad_cards,
                     transcription, transcribe_languages, provider, run,
                     videos=videos, video_summary=video_summary, video_lang=video_lang,
-                    video_languages=video_languages) }}
+                    video_languages=video_languages, history=history) }}
   {% endif %}
 {% else %}
 {% extends "base.html" %}
@@ -614,7 +680,7 @@
                     reach, brand_groups, page_rollup, ads_view, ad_cards,
                     transcription, transcribe_languages, provider, run,
                     videos=videos, video_summary=video_summary, video_lang=video_lang,
-                    video_languages=video_languages) }}
+                    video_languages=video_languages, history=history) }}
   {{ panel_close() }}
 
 {% else %}
@@ -857,6 +923,7 @@
             <th>Product</th>
             <th>Advertiser</th>
             <th class="num">Active</th>
+            <th class="num">Trend</th>
             <th class="num">Represented</th>
             <th class="num">Ad age</th>
             <th class="num">Pages</th>
@@ -888,6 +955,16 @@
                 {% if product.pages|length > 1 %}{{ ui.chip('+' ~ (product.pages|length - 1)) }}{% endif %}
               </td>
               <td class="num"><span class="adcount">{{ product.active_ad_count }}</span></td>
+              <td class="num">
+                {% if product.trend_delta is none %}
+                  <span class="muted">—</span>
+                {% else %}
+                  <span class="trend-badge {{ 'delta-up' if product.trend_delta > 0 else ('delta-down' if product.trend_delta < 0 else 'delta-flat') }}"
+                        title="vs previous scan{% if product.trend_growth_pct is not none %} ({{ '+' if product.trend_growth_pct > 0 }}{{ product.trend_growth_pct }}%){% endif %}">
+                    {{ '+' if product.trend_delta > 0 }}{{ product.trend_delta }}
+                  </span>
+                {% endif %}
+              </td>
               <td class="num">{{ product.represented_ad_count }}</td>
               <td class="num" title="Started {{ product.oldest_day or 'unknown' }}">
                 {{ product.age_label }}<br><small class="muted">{{ product.oldest_day }}</small>
@@ -914,11 +991,11 @@
             </tr>
           {% else %}
             {% if ctx.search or filter_count %}
-              {{ ui.empty_two('Nothing matches those filters.', 'Clear the search or reset the advanced filters.', colspan=7) }}
+              {{ ui.empty_two('Nothing matches those filters.', 'Clear the search or reset the advanced filters.', colspan=8) }}
             {% elif ctx.section in ('tracked', 'saved', 'favorite', 'hidden') %}
-              {{ ui.empty_two('No ' ~ ctx.section ~ ' products yet.', 'Use the row buttons on Full List to put products here.', colspan=7) }}
+              {{ ui.empty_two('No ' ~ ctx.section ~ ' products yet.', 'Use the row buttons on Full List to put products here.', colspan=8) }}
             {% else %}
-              {{ ui.empty_two('No products yet.', 'Products appear once ads carry a destination URL.', colspan=7) }}
+              {{ ui.empty_two('No products yet.', 'Products appear once ads carry a destination URL.', colspan=8) }}
             {% endif %}
           {% endfor %}
         </tbody>

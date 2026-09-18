@@ -62,6 +62,7 @@ __all__ = [
     "upsert_ad",
     "reconcile_page",
     "record_page_daily_snapshot",
+    "record_product_scan_snapshots",
     "content_hash",
     "collation_ceiling",
     "parse_start_date",
@@ -784,7 +785,8 @@ def reconcile_page(
     accepted_ad_ids: Iterable[int],
     now: str,
     grace_seconds: int | None = None,
-) -> int:
+    return_ids: bool = False,
+) -> int | list[int]:
     """Stop every previously-active ad Meta no longer shows for this page.
 
     Only ever called for a final page-scan batch with a complete/exhausted/empty
@@ -792,6 +794,10 @@ def reconcile_page(
     in the accepted set — they belong to an overlapping capture wave. Returns
     how many ads were stopped. A stopped ad that reappears later is revived by
     :func:`upsert_ad`.
+
+    With ``return_ids=True`` the stopped ad ids are returned instead of the
+    count — the product snapshot recorder needs them to attribute stops to
+    products.
     """
     grace = app_config.RECONCILE_GRACE_SECONDS if grace_seconds is None else int(grace_seconds)
     keep = {int(value) for value in accepted_ad_ids if int(value) > 0}
@@ -810,7 +816,7 @@ def reconcile_page(
     ]
     victims = [ad_id for ad_id in candidates if ad_id not in keep]
     if not victims:
-        return 0
+        return victims if return_ids else 0
 
     end_date = _day(now)
     for chunk in _chunked(victims):
@@ -823,7 +829,7 @@ def reconcile_page(
             """,
             (end_date, now, *chunk),
         )
-    return len(victims)
+    return victims if return_ids else len(victims)
 
 
 # ---------------------------------------------------------------------------
@@ -937,6 +943,110 @@ def record_page_daily_snapshot(conn, page_id: int, now: str | None = None) -> No
             int(row[1] or 0),
         ),
     )
+
+
+def record_product_scan_snapshots(
+    conn,
+    *,
+    page_id: int,
+    job_id: int,
+    now: str,
+    stopped_ad_ids: Iterable[int],
+) -> int:
+    """Write one ``product_scan_snapshots`` row per product on this page.
+
+    Called once per reconciled page-scan target, right after the page totals
+    and the daily snapshot. Each row freezes this scan's view of one product
+    on one page: how many of its ads are live, how many are new, how many
+    just stopped. Two consecutive rows are all the history UI needs for the
+    growth %.
+
+    ``stopped_ad_ids`` are the ids :func:`reconcile_page` just marked
+    inactive (``return_ids=True``) — attributing stops to products from the
+    ids is exact, unlike re-deriving them from ``end_date``. A product whose
+    every ad stopped still gets a row (active 0) so the graph shows the drop
+    instead of a gap.
+    """
+    stopped = {int(v) for v in stopped_ad_ids if int(v) > 0}
+
+    scan_start = now
+    target_row = conn.execute(
+        """
+        SELECT started_at FROM job_targets
+        WHERE job_id=? AND page_id=?
+        ORDER BY id DESC LIMIT 1
+        """,
+        (int(job_id), int(page_id)),
+    ).fetchone()
+    if target_row and target_row[0]:
+        scan_start = target_row[0]
+    else:
+        job_row = conn.execute(
+            "SELECT created_at FROM jobs WHERE id=?", (int(job_id),)
+        ).fetchone()
+        if job_row and job_row[0]:
+            scan_start = job_row[0]
+
+    product_ids = {
+        int(r[0])
+        for r in conn.execute(
+            """
+            SELECT DISTINCT ap.product_id
+            FROM ad_products ap
+            JOIN ads a ON a.id = ap.ad_id
+            WHERE a.page_id=?
+            """,
+            (int(page_id),),
+        ).fetchall()
+    }
+    if stopped:
+        placeholders = ",".join("?" for _ in stopped)
+        for r in conn.execute(
+            f"SELECT DISTINCT product_id FROM ad_products WHERE ad_id IN ({placeholders})",
+            tuple(stopped),
+        ).fetchall():
+            product_ids.add(int(r[0]))
+    if not product_ids:
+        return 0
+
+    stopped_marks = ",".join("?" for _ in stopped) if stopped else "NULL"
+    rows = conn.execute(
+        f"""
+        SELECT ap.product_id AS product_id,
+               COUNT(DISTINCT CASE WHEN a.status='active' THEN a.id END) AS active_ads,
+               COUNT(DISTINCT CASE WHEN datetime(a.first_captured_at) >= datetime(?)
+                                   THEN a.id END) AS new_ads,
+               COUNT(DISTINCT CASE WHEN a.id IN ({stopped_marks}) THEN a.id END) AS stopped_ads
+        FROM ad_products ap
+        JOIN ads a ON a.id = ap.ad_id
+        WHERE a.page_id=? AND ap.product_id IN ({",".join("?" for _ in product_ids)})
+        GROUP BY ap.product_id
+        """,
+        (scan_start, *(() if not stopped else tuple(stopped)), int(page_id), *sorted(product_ids)),
+    ).fetchall()
+
+    written = 0
+    for r in rows:
+        conn.execute(
+            """
+            INSERT INTO product_scan_snapshots(
+                product_id, page_id, job_id, scanned_at,
+                active_ads, new_ads, stopped_ads, created_at
+            ) VALUES(?,?,?,?,?,?,?,?)
+            ON CONFLICT(product_id, page_id, job_id) DO UPDATE SET
+                scanned_at=excluded.scanned_at,
+                active_ads=excluded.active_ads,
+                new_ads=excluded.new_ads,
+                stopped_ads=excluded.stopped_ads,
+                created_at=excluded.created_at
+            """,
+            (
+                int(r[0]), int(page_id), int(job_id), now,
+                int(r[1] or 0), int(r[2] or 0), int(r[3] or 0), now,
+            ),
+        )
+        written += 1
+    return written
 
 
 # ---------------------------------------------------------------------------
@@ -1202,15 +1312,18 @@ def ingest_batch(job_id: int, batch: dict) -> dict:
             )
 
         ads_deactivated = 0
+        stopped_ad_ids: list[int] = []
         if reconcile:
             accepted_ids = set(batch_ad_ids)
             accepted_ids |= _job_union_ad_ids(conn, parsed["job_id"], page_id, parsed["batch_id"])
-            ads_deactivated = reconcile_page(
+            stopped_ad_ids = reconcile_page(
                 conn,
                 page_id=page_id,
                 accepted_ad_ids=accepted_ids,
                 now=now,
+                return_ids=True,
             )
+            ads_deactivated = len(stopped_ad_ids)
 
         # --- 5. derived totals, snapshot, receipt ---------------------------
         active_ads = represented_ads = total_ads = 0
@@ -1234,6 +1347,23 @@ def ingest_batch(job_id: int, batch: dict) -> dict:
                 stopped_ads=ads_deactivated,
             )
             record_page_daily_snapshot(conn, page_id, now)
+            if reconcile:
+                # Per-product scan history ("18 the, ab 21"): one snapshot row
+                # per product on this page. Best-effort like product
+                # derivation — a snapshot bug must never fail the batch.
+                try:
+                    record_product_scan_snapshots(
+                        conn,
+                        page_id=page_id,
+                        job_id=parsed["job_id"],
+                        now=now,
+                        stopped_ad_ids=stopped_ad_ids,
+                    )
+                except Exception:  # noqa: BLE001 - snapshots are derived data
+                    log.exception(
+                        "product snapshots failed for page %s job %s",
+                        page_id, parsed["job_id"],
+                    )
 
         result: dict[str, Any] = {
             "status": "accepted",
