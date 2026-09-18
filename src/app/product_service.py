@@ -28,12 +28,14 @@ The numbers, and what they mean (v1's definitions, verbatim):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
 from typing import Any, Iterable, Sequence
 
 from . import db
+from .meta_links import normalize_product_url, product_display_name_from_url
 from .time_utils import utc_now
 
 # --- products ---------------------------------------------------------------
@@ -1855,6 +1857,96 @@ def set_page_tracked(page_ids: Sequence[int], tracked: bool) -> int:
             [1 if tracked else 0, now, *ids],
         )
     return len(ids)
+
+
+# ---------------------------------------------------------------------------
+# product derivation — ads grouped URL-wise into products
+# ---------------------------------------------------------------------------
+def derive_products_for_page(conn, page_id: int, now: str | None = None) -> dict:
+    """Group a page's ads into products by *normalized* destination URL.
+
+    The raw URL stays verbatim on ``ads.destination_url`` (source fidelity);
+    only the grouping key is normalized — tracking params (``fbclid``,
+    ``utm_*``, ``gclid``, ...) and fragments are stripped so one product page
+    never becomes many products.
+
+    Idempotent: re-running only links new ads and bumps ``last_seen_at``.
+    Products the owner removed permanently (``product_removed``) are never
+    resurrected. ``conn`` is the caller's sqlite3 connection — this function
+    never opens or commits its own transaction.
+    """
+    stamp = now or utc_now()
+    page_id = int(page_id or 0)
+    if page_id <= 0:
+        return {"products": 0, "adsLinked": 0, "urls": 0}
+
+    rows = conn.execute(
+        "SELECT id, destination_url FROM ads"
+        " WHERE page_id = ? AND COALESCE(destination_url, '') <> ''",
+        (page_id,),
+    ).fetchall()
+
+    by_url: dict[str, list[int]] = {}
+    for row in rows:
+        ad_id = int(row[0])
+        normalized = normalize_product_url(row[1])
+        if normalized:
+            by_url.setdefault(normalized, []).append(ad_id)
+
+    removed_hashes = {
+        str(r[0])
+        for r in conn.execute("SELECT identity_hash FROM product_removed").fetchall()
+    }
+
+    products_touched = 0
+    ads_linked = 0
+    for url in sorted(by_url):
+        identity_hash = hashlib.sha1(url.encode("utf-8")).hexdigest()
+        if identity_hash in removed_hashes:
+            continue
+        try:
+            host = url.split("://", 1)[1].split("/", 1)[0].split("?", 1)[0].lower()
+        except IndexError:
+            host = ""
+        display_name = product_display_name_from_url(url) or host or url[:80]
+
+        conn.execute(
+            "INSERT INTO products(normalized_name, display_name, product_url, domain,"
+            " first_seen_at, last_seen_at, created_at, updated_at)"
+            " VALUES(?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(normalized_name) DO UPDATE SET"
+            " last_seen_at = excluded.last_seen_at,"
+            " updated_at = excluded.updated_at",
+            (url, display_name, url, host, stamp, stamp, stamp, stamp),
+        )
+        # Look the id up instead of trusting lastrowid: an ON CONFLICT DO UPDATE
+        # does not reliably report the conflicting row's id.
+        found = conn.execute(
+            "SELECT id FROM products WHERE normalized_name = ?", (url,)
+        ).fetchone()
+        if found is None:  # pragma: no cover - defensive
+            continue
+        product_id = int(found[0])
+        # Fill blanks left by older rows without clobbering anything set.
+        conn.execute(
+            "UPDATE products SET display_name = CASE WHEN COALESCE(display_name,'') = ''"
+            " THEN ? ELSE display_name END,"
+            " product_url = CASE WHEN COALESCE(product_url,'') = ''"
+            " THEN ? ELSE product_url END,"
+            " domain = CASE WHEN COALESCE(domain,'') = '' THEN ? ELSE domain END"
+            " WHERE id = ?",
+            (display_name, url, host, product_id),
+        )
+        products_touched += 1
+        for ad_id in by_url[url]:
+            link = conn.execute(
+                "INSERT OR IGNORE INTO ad_products(ad_id, product_id, method,"
+                " confidence, created_at) VALUES(?, ?, 'url', 1.0, ?)",
+                (ad_id, product_id, stamp),
+            )
+            ads_linked += int(link.rowcount or 0)
+
+    return {"products": products_touched, "adsLinked": ads_linked, "urls": len(by_url)}
 
 
 __all__ = [name for name in dir() if not name.startswith("_")]

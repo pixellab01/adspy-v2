@@ -16,7 +16,7 @@ import hashlib
 import re
 import unicodedata
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse, unquote
 
 # v1 accepted 3+ digits for display/link purposes; ingest requires 5+ for a
 # page-scan batch (config.NUMERIC_PAGE_ID_MIN_DIGITS).
@@ -150,3 +150,108 @@ def page_link_payload(
         "platform_page_id": numeric_id or str(platform_page_id or "").strip(),
         "can_open_external": bool(external),
     }
+
+
+# ---------------------------------------------------------------------------
+# product URL normalization — one product page, one product row
+# ---------------------------------------------------------------------------
+# Ad Library CTA links usually arrive with tracking junk appended
+# (?fbclid=..., &utm_source=..., #fragments). Grouping ads on the verbatim URL
+# would split a single product page into many "products". The raw URL stays
+# verbatim on ads.destination_url (source fidelity); only the GROUPING key —
+# products.product_url / normalized_name — is normalized here.
+_TRACKING_QUERY_PARAMS = frozenset({
+    # Meta / Google / Microsoft / TikTok click ids
+    "fbclid", "gclid", "gclsrc", "dclid", "wbraid", "gbraid",
+    "msclkid", "ttclid", "igshid", "twclid", "li_fat_id",
+    # Mailchimp / generic
+    "mc_cid", "mc_eid", "_openstat",
+    # Meta ad-template leftovers sometimes seen on destination URLs
+    "fb_action_ids", "fb_action_types", "fb_source", "fb_ref",
+})
+
+_UTM_PREFIX = "utm_"
+
+
+def _is_tracking_param(name: str) -> bool:
+    lname = str(name or "").strip().lower()
+    return lname in _TRACKING_QUERY_PARAMS or lname.startswith(_UTM_PREFIX)
+
+
+def normalize_product_url(url: Any) -> str:
+    """Canonical grouping key for a product landing page.
+
+    - lowercases scheme + host, drops default ports,
+    - drops the #fragment,
+    - drops tracking query params (fbclid, gclid, utm_*, ...),
+    - keeps the remaining query params, sorted, for stability,
+    - strips a trailing slash (except the root path).
+
+    Returns '' when the URL is empty or has no usable host.
+    """
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    try:
+        candidate = raw if "://" in raw else "https://" + raw
+        parsed = urlparse(candidate)
+    except (TypeError, ValueError):
+        return ""
+    host = (parsed.hostname or "").strip().lower()
+    if not host or not re.fullmatch(r"[a-z0-9.-]+", host) or "." not in host:
+        return ""
+    scheme = (parsed.scheme or "https").lower()
+    if scheme not in ("http", "https"):
+        return ""
+    # Drop default ports; keep the rest.
+    port = parsed.port
+    netloc = host
+    if port and not (scheme == "http" and port == 80) and not (scheme == "https" and port == 443):
+        netloc = f"{host}:{port}"
+    path = parsed.path or ""
+    if len(path) > 1 and path.endswith("/"):
+        path = path.rstrip("/")
+    try:
+        kept: list[tuple[str, str]] = []
+        for key, values in parse_qs(parsed.query, keep_blank_values=False).items():
+            if _is_tracking_param(key):
+                continue
+            for value in values:
+                kept.append((key, value))
+        kept.sort(key=lambda kv: (kv[0].lower(), kv[1]))
+        query = urlencode(kept, doseq=False)
+    except (TypeError, ValueError):
+        query = ""
+    return urlunparse((scheme, netloc, path, "", query, ""))
+
+
+def product_display_name_from_url(normalized_url: Any) -> str:
+    """Human-readable product name derived from the (normalized) product URL.
+
+    Uses the last path segment — ``/products/mala-108-beads`` -> ``Mala 108 Beads``.
+    Falls back to the host when the path carries no name.
+    """
+    raw = str(normalized_url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw if "://" in raw else "https://" + raw)
+    except (TypeError, ValueError):
+        return ""
+    segments = [seg for seg in (parsed.path or "").split("/") if seg]
+    name = ""
+    if segments:
+        name = unquote(segments[-1])
+        # strip common page extensions: product.html, item.php, ...
+        name = re.sub(r"\.(html?|php|aspx?|jsp)$", "", name, flags=re.IGNORECASE)
+    if not name:
+        name = parsed.hostname or ""
+    name = re.sub(r"[-_+]+", " ", name).strip()
+    name = re.sub(r"\s+", " ", name)
+    if not name:
+        return ""
+    # Title-case gently: keep all-caps tokens (SKUs) as they are.
+    words = []
+    for word in name.split(" "):
+        words.append(word if word.isupper() and len(word) > 1 else word.capitalize())
+    return " ".join(words)[:160]

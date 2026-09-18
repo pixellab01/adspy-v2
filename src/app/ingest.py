@@ -1154,6 +1154,40 @@ def ingest_batch(job_id: int, batch: dict) -> dict:
         if skipped_missing_id:
             warnings.append(f"{skipped_missing_id} ad(s) skipped: no libraryId")
 
+        # --- 3b. product derivation (URL-wise grouping) ----------------------
+        # Ads are grouped into products by NORMALIZED destination URL —
+        # tracking params (fbclid, utm_*, gclid, ...) are stripped for the
+        # grouping key only; ads.destination_url stays verbatim. A derive bug
+        # must never fail the batch: the ads are already safely stored.
+        try:
+            from .product_service import derive_products_for_page as _derive
+
+            derive_page_ids: set[int] = set()
+            if page_id is not None:
+                derive_page_ids.add(int(page_id))
+            elif batch_ad_ids:
+                placeholders = ",".join("?" for _ in batch_ad_ids)
+                for prow in conn.execute(
+                    f"SELECT DISTINCT page_id FROM ads WHERE id IN ({placeholders})",
+                    tuple(batch_ad_ids),
+                ).fetchall():
+                    if prow[0]:
+                        derive_page_ids.add(int(prow[0]))
+            derived_products = 0
+            derived_links = 0
+            for derive_pid in sorted(derive_page_ids):
+                stats = _derive(conn, derive_pid, now)
+                derived_products += int(stats.get("products") or 0)
+                derived_links += int(stats.get("adsLinked") or 0)
+            if derived_products:
+                warnings.append(
+                    f"derived {derived_products} product(s),"
+                    f" {derived_links} ad link(s) URL-wise"
+                )
+        except Exception as exc:  # noqa: BLE001 - derive is best-effort
+            log.warning("product derivation failed for job %s: %r", job_id, exc)
+            warnings.append("product derivation skipped (internal error; ads kept)")
+
         # --- 4. reconciliation (the only place ads ever go inactive) --------
         reconcile = (
             parsed["is_final"]
