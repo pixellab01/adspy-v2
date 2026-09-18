@@ -75,7 +75,7 @@ def meta_ads_library_url(platform_page_id: Any = None, page_url: Any = None) -> 
         {
             "active_status": "active",
             "ad_type": "all",
-            "country": "ALL",
+            "country": "IN",
             "view_all_page_id": page_id,
         }
     )
@@ -87,11 +87,11 @@ def meta_ad_url(library_id: Any) -> str:
     ad_id = str(library_id or "").strip()
     if not ad_id:
         return ""
-    query = urlencode({"id": ad_id, "country": "ALL", "ad_type": "all"})
+    query = urlencode({"id": ad_id, "country": "IN", "ad_type": "all"})
     return f"https://www.facebook.com/ads/library/?{query}"
 
 
-def meta_keyword_search_url(keyword: Any, country: str = "ALL") -> str:
+def meta_keyword_search_url(keyword: Any, country: str = "IN") -> str:
     """Ad Library keyword-search URL (job_type 'keyword', Phase 4)."""
     query_text = str(keyword or "").strip()
     if not query_text:
@@ -100,7 +100,7 @@ def meta_keyword_search_url(keyword: Any, country: str = "ALL") -> str:
         {
             "active_status": "active",
             "ad_type": "all",
-            "country": country or "ALL",
+            "country": country or "IN",
             "q": query_text,
             "search_type": "keyword_unordered",
         }

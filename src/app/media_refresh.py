@@ -45,7 +45,7 @@ from typing import Any
 
 log = logging.getLogger("adspy2.media_refresh")
 
-AD_LIBRARY_URL = "https://www.facebook.com/ads/library/?id={library_id}"
+AD_LIBRARY_URL = "https://www.facebook.com/ads/library/?id={library_id}&country=IN"
 
 MIN_INTERVAL_SECONDS = 2.5
 MAX_IN_FLIGHT = 2

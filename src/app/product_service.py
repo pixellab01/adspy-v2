@@ -686,7 +686,7 @@ def product_ads(product_id: int, *, language: str = "", limit: int = 500) -> lis
         row["age_label"] = _age_label(row.get("age_days"))
         row["start_day"] = (row.get("start_date") or "")[:10]
         row["library_url"] = (
-            f"https://www.facebook.com/ads/library/?id={row['library_id']}"
+            f"https://www.facebook.com/ads/library/?id={row['library_id']}&country=IN"
             if row.get("library_id") else ""
         )
     return rows
@@ -1134,7 +1134,7 @@ def product_ad_cards(product_id: int, *, language: str = "", limit: int = 60) ->
             "is_video": (row.get("media_type") or "").lower() == "video",
             "snippet": text[:220] + ("…" if len(text) > 220 else ""),
             "library_url": (
-                f"https://www.facebook.com/ads/library/?id={row['library_id']}"
+                f"https://www.facebook.com/ads/library/?id={row['library_id']}&country=IN"
                 if row.get("library_id") else ""
             ),
             "script_label": f"S-{row['script_id']}" if row.get("script_id") else "",
@@ -1643,7 +1643,7 @@ def group_pages(
         row["top_product"] = _top_product_for_page(int(row["id"]))
         row["library_url"] = (
             f"https://www.facebook.com/ads/library/?active_status=active&ad_type=all"
-            f"&country=ALL&view_all_page_id={row['platform_page_id']}"
+            f"&country=IN&view_all_page_id={row['platform_page_id']}"
             if row.get("platform_page_id") else ""
         )
 

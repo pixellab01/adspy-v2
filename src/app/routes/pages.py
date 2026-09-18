@@ -60,7 +60,7 @@ def _ensure_session_key(state) -> None:
 ADD_PAGE_HELP = (
     "Paste the page's Ad Library URL, e.g. "
     "https://www.facebook.com/ads/library/?active_status=active&ad_type=all"
-    "&country=ALL&view_all_page_id=123456789012345"
+    "&country=IN&view_all_page_id=123456789012345"
 )
 
 

@@ -303,7 +303,7 @@ def automation_from_form(form: Any) -> dict[str, Any]:
 def keyword_search_url(
     keyword: Any,
     *,
-    country: str = "ALL",
+    country: str = "IN",
     ad_status: str = "active",
     media_type: str = "all",
     platform: str = "all",
@@ -319,7 +319,7 @@ def keyword_search_url(
     (``#adspy_max_ads=…&adspy_max_pages=…``) never reach Facebook: fragments
     are not sent on the wire. The extension reads them off ``target.pageUrl``.
     """
-    base = meta_keyword_search_url(keyword, str(country or "ALL"))
+    base = meta_keyword_search_url(keyword, str(country or "IN"))
     if not base:
         return ""
     parts = urlsplit(base)
@@ -599,7 +599,7 @@ def start_run(run_id: int) -> int:
     depth = _int(run["default_depth"], DEPTH_DEFAULT)
     search_url = keyword_search_url(
         keyword,
-        country=str(run["country"] or "ALL"),
+        country=str(run["country"] or "IN"),
         ad_status=str(run["ad_status"] or "active"),
         media_type=str(run["media_type"] or "all"),
         platform=str(run["platform"] or "all"),
